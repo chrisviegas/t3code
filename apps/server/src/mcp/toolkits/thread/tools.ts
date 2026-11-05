@@ -28,10 +28,11 @@ import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as Settings from "../../../serverSettings.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
+    "Pin, snooze, settle, archive, mark unread, or move a thread between sidebar groups. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. `move_to_group` needs `group`, a group name or id; a new name creates the group. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -45,8 +46,11 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "archive",
       "unarchive",
       "mark_unread",
+      "move_to_group",
+      "remove_from_group",
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
+    group: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(80))),
   }),
   success: Schema.Union([
     OrchestrationV2DispatchCommandResult,
@@ -58,6 +62,7 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     SecureRandom.SecureRandom,
+    Settings.ServerSettingsService,
   ],
 })
   .annotate(Tool.Title, "Organize a thread")

@@ -1692,6 +1692,21 @@ export const layer: Layer.Layer<
           key: `mcp_app_${entry.itemId.replace(/[^\w.-]/g, "_")}`,
           text: entry.text,
         }));
+        // Read per turn, so a thread the user moves between groups tells its agent on the next turn.
+        const groupId = input.appThread.groupId;
+        const group =
+          groupId == null
+            ? undefined
+            : (yield* serverSettings.getSettings.pipe(
+                Effect.map((settings) => settings.threadGroups),
+                Effect.orElseSucceed(() => []),
+              )).find((candidate) => candidate.id === groupId);
+        if (group !== undefined) {
+          appContext.push({
+            key: "t3_thread_group",
+            text: `This thread is in the T3 sidebar group "${group.name}". Threads you create from it join the group. To see the group's other threads, call t3_thread_list with group "${group.name}".`,
+          });
+        }
         const turnInput = {
           appThread: input.appThread,
           threadId: input.run.threadId,

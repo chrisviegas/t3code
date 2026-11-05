@@ -45,6 +45,7 @@ import { AuthMcpClientAccess } from "./auth.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
+import { ThreadGroupId } from "./threadGroups.ts";
 import {
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
@@ -153,7 +154,7 @@ export type OrchestrationV2ProviderRef = typeof OrchestrationV2ProviderRef.Type;
 
 export const OrchestrationV2AppThreadLineage = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
-  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent", "spawned"])),
   rootThreadId: ThreadId,
   sideChat: Schema.optional(Schema.Boolean),
 });
@@ -492,6 +493,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   /** Absent on threads written before tags existed; read as empty. */
   tags: Schema.optional(StoredThreadTags),
+  /** The sidebar group (from server settings) this thread sits in; absent or null is none. */
+  groupId: Schema.optional(Schema.NullOr(ThreadGroupId)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -2137,6 +2140,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   /** Absent on threads written before tags existed; read as empty. */
   tags: Schema.optional(StoredThreadTags),
+  /** The sidebar group (from server settings) this thread sits in; absent or null is none. */
+  groupId: Schema.optional(Schema.NullOr(ThreadGroupId)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
@@ -2920,6 +2925,10 @@ export const OrchestrationV2Command = Schema.Union([
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
     /** Only the server sets this, with `linkOrigin`, for a linked environment's delegated task. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    /** Only the server sets this: the thread whose agent created this one as an ordinary thread. */
+    spawnedFrom: Schema.optional(ThreadId),
+    /** The sidebar group the thread starts in. */
+    groupId: Schema.optional(Schema.NullOr(ThreadGroupId)),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({
@@ -3039,6 +3048,19 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.mark-unread"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  /** Move a thread into a sidebar group, or out of any with null. */
+  Schema.Struct({
+    type: Schema.Literal("thread.group.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    groupId: Schema.NullOr(ThreadGroupId),
+  }),
+  /** Lift a fork or agent-spawned thread out from under its parent; it keeps its history. */
+  Schema.Struct({
+    type: Schema.Literal("thread.lineage.detach"),
     commandId: CommandId,
     threadId: ThreadId,
   }),

@@ -314,6 +314,9 @@ export function useThreadActions() {
   const createProjectFromThread = useAtomCommand(projectEnvironment.createFromThread, {
     reportFailure: false,
   });
+  const detachFromParent = useAtomCommand(threadEnvironment.detachFromParent, {
+    reportFailure: false,
+  });
   const stopThreadSession = useOrchestrationCommand(threadEnvironment.stopSession);
   const removeWorktree = useAtomCommand(vcsEnvironment.removeWorktree, {
     reportFailure: false,
@@ -967,6 +970,11 @@ export function useThreadActions() {
     setThreadAutoSettle,
     turnThreadIntoProject: (target: ScopedThreadRef) =>
       createProjectFromThread({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId },
+      }),
+    detachThreadFromParent: (target: ScopedThreadRef) =>
+      detachFromParent({
         environmentId: target.environmentId,
         input: { threadId: target.threadId },
       }),

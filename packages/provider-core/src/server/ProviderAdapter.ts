@@ -709,5 +709,11 @@ export class ProviderAdapterV2 extends Context.Service<
     readonly openSession: (
       input: ProviderAdapterV2OpenSessionInput,
     ) => Effect.Effect<ProviderAdapterV2SessionRuntime, ProviderAdapterV2Error, Scope.Scope>;
+    /** Retitles the provider's own record of a thread, which its tools list sessions by. */
+    readonly renameThread?: (input: {
+      readonly providerThread: OrchestrationV2ProviderThread;
+      readonly title: string;
+      readonly cwd: string | null;
+    }) => Effect.Effect<void, ProviderAdapterV2Error>;
   }
 >()("@t3tools/provider-core/server/ProviderAdapter/ProviderAdapterV2") {}

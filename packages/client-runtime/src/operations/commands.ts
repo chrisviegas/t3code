@@ -125,6 +125,10 @@ export interface VisitThreadInput extends ThreadCommandInput {
 }
 
 export type MarkThreadUnreadInput = ThreadCommandInput;
+export type DetachThreadFromParentInput = ThreadCommandInput;
+export interface SetThreadGroupInput extends ThreadCommandInput {
+  readonly groupId: string | null;
+}
 
 export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecoveryUpdate | null;
@@ -603,6 +607,27 @@ export const markThreadUnread = Effect.fn("EnvironmentCommands.markThreadUnread"
     type: "thread.mark-unread",
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
+  });
+});
+
+export const detachThreadFromParent = Effect.fn("EnvironmentCommands.detachThreadFromParent")(
+  function* (input: DetachThreadFromParentInput) {
+    return yield* dispatch({
+      type: "thread.lineage.detach",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+    });
+  },
+);
+
+export const setThreadGroup = Effect.fn("EnvironmentCommands.setThreadGroup")(function* (
+  input: SetThreadGroupInput,
+) {
+  return yield* dispatch({
+    type: "thread.group.set",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    groupId: input.groupId,
   });
 });
 

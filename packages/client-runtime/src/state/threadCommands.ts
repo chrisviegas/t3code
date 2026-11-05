@@ -30,6 +30,8 @@ import {
   forkSideChat,
   forkThreadFromRun,
   markThreadUnread,
+  detachThreadFromParent,
+  setThreadGroup,
   mergeThreadBack,
   promoteQueuedRun,
   resumeThreadQueue,
@@ -218,6 +220,18 @@ export function createThreadEnvironmentAtoms<R, E>(
     markUnread: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:mark-unread",
       execute: markThreadUnread,
+      scheduler,
+      concurrency,
+    }),
+    setGroup: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:set-group",
+      execute: setThreadGroup,
+      scheduler,
+      concurrency,
+    }),
+    detachFromParent: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:detach-from-parent",
+      execute: detachThreadFromParent,
       scheduler,
       concurrency,
     }),

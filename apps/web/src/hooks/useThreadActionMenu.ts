@@ -19,6 +19,7 @@ import { pickSnoozePreset, resolveSnoozePresets } from "../components/Sidebar.sn
 import {
   buildThreadActionMenuItems,
   threadActionRequiresOperate,
+  threadCanDetachFromParent,
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -87,6 +88,7 @@ export function useThreadActionMenu(input: {
     deleteThread,
     markThreadUnread,
     turnThreadIntoProject,
+    detachThreadFromParent,
   } = useThreadActions();
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -149,6 +151,7 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+        canDetachFromParent: threadCanDetachFromParent(thread.lineage),
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -262,6 +265,13 @@ export function useThreadActionMenu(input: {
         case "share-guest":
           openGuestShareDialog(threadRef);
           return;
+        case "detach-from-parent": {
+          const result = await detachThreadFromParent(threadRef);
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            failureToast("Could not detach thread", squashAtomCommandFailure(result));
+          }
+          return;
+        }
         case "turn-into-project": {
           const result = await turnThreadIntoProject(threadRef);
           if (result._tag === "Success") {

@@ -153,6 +153,11 @@ export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error
 
 export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
+  /**
+   * Copies the thread's title onto its active provider thread where the provider keeps session
+   * titles. Best effort: a provider without titles, or a failed write, changes nothing.
+   */
+  readonly renameProviderThread: (threadId: ThreadId) => Effect.Effect<void>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -2117,6 +2122,31 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         shutdown,
+        renameProviderThread: Effect.fn("ProviderSessionManager.renameProviderThread")(
+          function* (threadId: ThreadId) {
+            const { thread, providerThreads } = yield* projectionStore.getThreadRecords(threadId, [
+              "providerThreads",
+            ]);
+            const providerThread = providerThreads.find(
+              (candidate) => candidate.id === thread.activeProviderThreadId,
+            );
+            if (providerThread === undefined) return;
+            const adapter = yield* registry.get(providerThread.providerInstanceId);
+            if (adapter.renameThread === undefined) return;
+            // A root thread has no worktree; the provider then finds the session by id alone.
+            yield* adapter.renameThread({
+              providerThread,
+              title: thread.title,
+              cwd: thread.worktreePath,
+            });
+          },
+          (effect, threadId) =>
+            effect.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("provider thread rename failed", { threadId, cause }),
+              ),
+            ),
+        ),
         open: (input) =>
           sessionOpen.withLock(
             input.providerSessionId,

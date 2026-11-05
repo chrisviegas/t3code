@@ -1,3 +1,4 @@
+import { ThreadGroup } from "./threadGroups.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -335,6 +336,9 @@ export const OrchestratorMcpThreadListInput = Schema.Struct({
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
   ),
   titleContains: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  group: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(80))).annotate({
+    description: "Only threads in this sidebar group, by name or id.",
+  }),
   settled: Schema.optional(Schema.Boolean),
   snoozed: Schema.optional(Schema.Boolean),
   includeSubagents: Schema.optional(Schema.Boolean),
@@ -372,7 +376,9 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   snoozed: Schema.Boolean,
   snoozedUntil: Schema.NullOr(IsoDateTime),
   parentThreadId: Schema.NullOr(ThreadId),
-  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent", "spawned"])),
+  /** The sidebar group the thread sits in. */
+  group: Schema.optional(Schema.NullOr(ThreadGroup)),
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -384,6 +390,8 @@ export const OrchestratorMcpThreadListResult = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   currentThreadId: Schema.NullOr(ThreadId),
   threads: Schema.Array(OrchestratorMcpThreadListItem),
+  /** Every sidebar group this environment defines, in display order. */
+  groups: Schema.optional(Schema.Array(ThreadGroup)),
   nextCursor: Schema.NullOr(NonNegativeInt),
   total: NonNegativeInt,
 });
@@ -442,7 +450,9 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   parentThreadId: Schema.NullOr(ThreadId),
-  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent", "spawned"])),
+  /** The sidebar group the thread sits in. */
+  group: Schema.optional(Schema.NullOr(ThreadGroup)),
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,

@@ -1,4 +1,4 @@
-import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession, getSessionMessages, renameSession } from "@anthropic-ai/claude-agent-sdk";
 import * as Schema from "effect/Schema";
 
 // Bundled import.meta.main is always true; imports must have no side effects.
@@ -8,6 +8,7 @@ const decodeHistoryOptions = Schema.decodeSync(
       dir: Schema.optionalKey(Schema.String),
       includeSystemMessages: Schema.optionalKey(Schema.Boolean),
       upToMessageId: Schema.optionalKey(Schema.String),
+      title: Schema.optionalKey(Schema.String),
     }),
   ),
 );
@@ -29,8 +30,14 @@ export async function runClaudeHistoryWorker(
               .catch(() => undefined);
             return headMessageId === undefined ? forked : { ...forked, headMessageId };
           })
-        : (() => {
-            throw new Error("Unknown Claude history operation.");
-          })();
+        : method === "renameSession" && options.title !== undefined
+          ? await renameSession(
+              sessionId,
+              options.title,
+              options.dir === undefined ? {} : { dir: options.dir },
+            ).then(() => ({}))
+          : (() => {
+              throw new Error("Unknown Claude history operation.");
+            })();
   process.stdout.write(JSON.stringify(result));
 }

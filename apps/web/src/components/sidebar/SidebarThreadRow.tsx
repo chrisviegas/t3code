@@ -33,6 +33,7 @@ import {
   AlarmClockOffIcon,
   ArrowRightLeftIcon,
   CheckIcon,
+  ChevronDownIcon,
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
@@ -532,11 +533,56 @@ function TopStatusIcon(props: { icon: keyof typeof TOP_STATUS_ICONS; className: 
   return <Icon aria-hidden className={cn("shrink-0", props.className)} />;
 }
 
+const NESTING_INDENT_REM = 1;
+
+function nestingIndentStyle(depth: number) {
+  return depth > 0 ? { paddingInlineStart: `${depth * NESTING_INDENT_REM}rem` } : undefined;
+}
+
+// Ancestor levels with a later sibling get a full-height line; the row's own level gets an elbow
+// into its first line, running on down when a sibling follows.
+function NestingTreeLines(props: { guides: string; offsetRem?: number }) {
+  if (props.guides === "") return null;
+  const depth = props.guides.length;
+  const inset = (level: number) =>
+    `${level * NESTING_INDENT_REM + 0.5 + (props.offsetRem ?? 0)}rem`;
+  return (
+    <>
+      {[...props.guides].map((guide, level) =>
+        guide === "1" ? (
+          <span
+            // oxlint-disable-next-line react/no-array-index-key -- a guide is its tree level; levels never reorder
+            key={level}
+            aria-hidden
+            className={cn(
+              "pointer-events-none absolute bottom-0 border-l border-border",
+              level === depth - 1 ? "top-4" : "top-0",
+            )}
+            style={{ insetInlineStart: inset(level) }}
+          />
+        ) : null,
+      )}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute top-0 h-4.5 w-2 rounded-bl-sm border-b border-l border-border"
+        style={{ insetInlineStart: inset(depth - 1) }}
+      />
+    </>
+  );
+}
+
 type SidebarThreadRowProps = {
   thread: SidebarThreadSummary;
   // "folder" is a one-line row inside a boring sidebar project folder;
   // "folder-multiline" adds the card's branch and PR line under it.
   variant: "card" | "slim" | "folder" | "folder-multiline";
+  // Tree guides under forks and agent-spawned parents; see SidebarNesting.guidesByKey.
+  nestingGuides?: string | undefined;
+  // A one-line row in a thread group: groups mix projects, so it keeps the project and provider icons.
+  inGroup?: boolean | undefined;
+  nestedChildCount?: number | undefined;
+  nestedCollapsed?: boolean | undefined;
+  onToggleNested?: ((threadKey: string) => void) | undefined;
   navigationParent?: string | undefined;
   variantAction: SidebarSweepAction;
   settlementSupported: boolean;
@@ -652,6 +698,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     thread,
     variant,
     variantAction,
+    nestingGuides = "",
+    inGroup = false,
+    nestedChildCount = 0,
+    nestedCollapsed = false,
+    onToggleNested,
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
@@ -1020,7 +1071,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     <span
       aria-hidden
       className={cn(
-        "min-w-0 flex-1 text-start text-sm transition-opacity motion-reduce:transition-none",
+        "min-w-0 text-start text-sm transition-opacity motion-reduce:transition-none",
+        // A parent's fold toggle sits right after its title, so the title stops growing.
+        nestedChildCount > 0 ? "flex-initial" : "flex-1",
         shouldRecede ? "font-normal" : "font-medium",
         variant !== "slim"
           ? cn(
@@ -1096,6 +1149,41 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   ) : null;
   const showPin =
     props.isPinned && (!sortable?.isDragging || (props.dragOverPinned && props.dropVerb === null));
+  const nestedToggle =
+    nestedChildCount > 0 && onToggleNested !== undefined ? (
+      <button
+        type="button"
+        aria-expanded={!nestedCollapsed}
+        aria-label={
+          nestedCollapsed
+            ? `Show ${nestedChildCount} nested thread${nestedChildCount === 1 ? "" : "s"}`
+            : "Hide nested threads"
+        }
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleNested(threadKey);
+        }}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+        // Keeps the row's drag sensor from starting a drag.
+        onPointerDown={(event) => event.stopPropagation()}
+        className="inline-flex shrink-0 cursor-pointer items-center rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <ChevronDownIcon
+          aria-hidden
+          className={cn("size-3.5 transition-transform", nestedCollapsed && "-rotate-90")}
+        />
+      </button>
+    ) : null;
+  const titleWithToggle =
+    nestedToggle === null ? (
+      title
+    ) : (
+      <span className="flex min-w-0 flex-1 items-center gap-1">
+        {title}
+        {nestedToggle}
+      </span>
+    );
   const pinIndicator = showPin ? (
     props.pinningSupported && canOperateThread && !sortable?.isDragging ? (
       <Tooltip>
@@ -1206,8 +1294,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_--spacing(9)]",
           metaLine !== null && multiline && "[contain-intrinsic-size:auto_--spacing(13.5)]",
           sortable?.isDragging && "relative z-20",
+          nestingGuides !== "" && "relative",
         )}
+        style={nestingIndentStyle(nestingGuides.length)}
       >
+        <NestingTreeLines guides={nestingGuides} offsetRem={inFolder && !inGroup ? 1.75 : 0} />
         <Tooltip disabled={sortable?.isDragging}>
           <TooltipTrigger
             render={
@@ -1227,7 +1318,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     ? "flex flex-col justify-center px-2.5 py-1.5"
                     : "flex h-9 items-center gap-2.5 px-2.5",
                   // Lines titles up with the folder name, past its chevron and icon.
-                  inFolder && "ps-9",
+                  inFolder && !inGroup && "ps-9",
                 )}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
@@ -1239,11 +1330,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {/* `contents` keeps one-line rows a single flex row. */}
             <div className={multiline ? "flex h-6 min-w-0 items-center gap-2.5" : "contents"}>
               {accessibleTitle}
-              {inFolder ? null : (
+              {inFolder && !inGroup ? null : (
                 <span
                   className={cn(
                     "flex shrink-0 items-center transition-opacity",
-                    (!props.isActive || variantAction === "unsettle") &&
+                    !inGroup &&
+                      (!props.isActive || variantAction === "unsettle") &&
                       "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
                   )}
                 >
@@ -1253,8 +1345,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 </span>
               )}
               {draftIndicator}
-              {title}
+              {titleWithToggle}
               {multiline ? titleLineIcons : null}
+              {inGroup && !multiline ? (
+                <span aria-hidden className="inline-flex shrink-0 items-center">
+                  <SidebarProviderStack
+                    thread={thread}
+                    providerEntryByInstanceId={props.providerEntryByInstanceId}
+                  />
+                </span>
+              ) : null}
               {pinIndicator}
               {multiline ? null : terminalStatusIcon}
               {isRegeneratingTitle ? (
@@ -1402,8 +1502,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
         metaLineEmpty && "[contain-intrinsic-size:auto_58px]",
         sortable?.isDragging && "relative z-20",
+        nestingGuides !== "" && "relative",
       )}
+      style={nestingIndentStyle(nestingGuides.length)}
     >
+      <NestingTreeLines guides={nestingGuides} />
       <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
         <TooltipTrigger
           render={
@@ -1578,7 +1681,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               {props.sweepAction !== null ? dragDestination : null}
             </div>
             <div className="mt-1 flex min-w-0 items-center gap-1.5">
-              {title}
+              {titleWithToggle}
               {isRegeneratingTitle ? (
                 <span role="status" className="sr-only">
                   Regenerating title
