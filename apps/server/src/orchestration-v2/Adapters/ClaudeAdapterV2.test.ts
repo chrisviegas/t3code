@@ -316,6 +316,20 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     );
   });
 
+  it("appends T3's per-turn context after the user's text, except to slash commands", () => {
+    const context = [
+      { key: "t3_thread_group", text: "In group Dudu." },
+      { key: "mcp_app_item-1", text: "app state" },
+    ];
+    assert.equal(
+      ClaudeAdapterV2.withClaudeAppContext("Fix the bug", context),
+      'Fix the bug\n\n<t3_context name="t3_thread_group">\nIn group Dudu.\n</t3_context>',
+    );
+    assert.equal(ClaudeAdapterV2.withClaudeAppContext("/compact", context), "/compact");
+    assert.equal(ClaudeAdapterV2.withClaudeAppContext("Fix it", context.slice(1)), "Fix it");
+    assert.equal(ClaudeAdapterV2.withClaudeAppContext("Fix it", undefined), "Fix it");
+  });
+
   it("pins Claude's auto tool search on through flag settings", () => {
     const override = ClaudeAdapterV2.claudeToolSearchOverride;
     for (const value of ["auto", "auto:10", "auto:99.5", "auto:x", "auto:Infinity"]) {

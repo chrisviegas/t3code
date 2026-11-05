@@ -1,3 +1,4 @@
+import type { ThreadGroup } from "@t3tools/contracts";
 import {
   CommandId,
   type RunId,
@@ -797,6 +798,7 @@ function listItemFromShell(
   scope: McpInvocationScope,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  groups: ReadonlyArray<ThreadGroup>,
 ): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
@@ -817,6 +819,7 @@ function listItemFromShell(
     ...threadSnooze(shell, nowMs),
     parentThreadId: shell.lineage.parentThreadId,
     relationshipToParent: shell.lineage.relationshipToParent,
+    group: groups.find((group) => group.id === shell.groupId) ?? null,
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
     updatedAt: DateTime.formatIso(shell.updatedAt),
@@ -829,6 +832,7 @@ function threadDetail(
   itemCount: number,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  groups: ReadonlyArray<ThreadGroup>,
 ): OrchestratorMcpThreadDetail {
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
@@ -860,6 +864,7 @@ function threadDetail(
     worktreePath: projection.thread.worktreePath,
     parentThreadId: projection.thread.lineage.parentThreadId,
     relationshipToParent: projection.thread.lineage.relationshipToParent,
+    group: groups.find((group) => group.id === projection.thread.groupId) ?? null,
     runCount: projection.runs.length,
     itemCount,
     pendingRequestCount: projection.runtimeRequests.filter(
@@ -1021,6 +1026,11 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  // Group names are display context only, so an unreadable settings file reads as no groups.
+  const readThreadGroups = serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.threadGroups),
+    Effect.orElseSucceed((): ReadonlyArray<ThreadGroup> => []),
+  );
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
 
   const requireProject = (projectId: ProjectId) =>
@@ -2854,6 +2864,8 @@ const make = Effect.gen(function* () {
                   interactionMode,
                   branch: parent.thread.branch,
                   worktreePath: parent.thread.worktreePath,
+                  spawnedFrom: parent.thread.id,
+                  ...(parent.thread.groupId == null ? {} : { groupId: parent.thread.groupId }),
                   ...(parent.thread.linkOrigin === undefined
                     ? {}
                     : { linkOrigin: parent.thread.linkOrigin }),
@@ -2969,7 +2981,16 @@ const make = Effect.gen(function* () {
           ? null
           : new Set(input.statuses);
       const titleContains = input.titleContains?.toLocaleLowerCase();
+      const groups = yield* readThreadGroups;
+      const groupFilter =
+        input.group === undefined
+          ? undefined
+          : (groups.find((group) => group.id === input.group) ??
+            groups.find(
+              (group) => group.name.toLocaleLowerCase() === input.group?.toLocaleLowerCase(),
+            ) ?? { id: null });
       const filtered = projectThreads
+        .filter((thread) => groupFilter === undefined || thread.groupId === groupFilter.id)
         .filter(
           (thread) => statuses === null || statuses.has(thread.activityRunStatus ?? thread.status),
         )
@@ -2991,7 +3012,8 @@ const make = Effect.gen(function* () {
       return {
         projectId,
         currentThreadId: parent?.thread.id ?? null,
-        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs)),
+        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs, groups)),
+        groups,
         nextCursor,
         total: filtered.length,
       } satisfies OrchestratorMcpThreadListResult;
@@ -3089,6 +3111,7 @@ const make = Effect.gen(function* () {
           timeline.totalItems,
           shell,
           yield* Clock.currentTimeMillis,
+          yield* readThreadGroups,
         ),
         recentRuns: target.runs
           .toSorted((left, right) => right.ordinal - left.ordinal)

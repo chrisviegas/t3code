@@ -118,6 +118,8 @@ export const layerExecutor: Layer.Layer<
               ),
             );
           }
+          case "provider-thread.rename":
+            return providerSessions.renameProviderThread(effect.threadId);
           case "provider-session.detach":
             return providerSessions
               .detach({

@@ -611,6 +611,74 @@ export function resolveSidebarRowThreadId(
   return thread?.id ?? threadId;
 }
 
+export interface SidebarNesting {
+  /**
+   * Tree guides for rows below the top level, by thread key: one character per level, "1" where
+   * that level's line runs on past the row because a later sibling follows. A string, so rows
+   * stay memoized across repartitions.
+   */
+  readonly guidesByKey: Map<string, string>;
+  /** Direct listed children, by parent thread key; counted even while collapsed. */
+  readonly childCountByKey: Map<string, number>;
+}
+
+export function emptySidebarNesting(): SidebarNesting {
+  return { guidesByKey: new Map(), childCountByKey: new Map() };
+}
+
+/**
+ * Moves each listed child (a fork or an agent-spawned thread) right under its parent when both
+ * sit in `threads`, keeping the given order otherwise. A child whose parent is elsewhere stays put.
+ * Descendants of a collapsed parent go to `hidden` instead.
+ */
+export function nestSidebarThreads<
+  T extends Pick<SidebarThreadSummary, "environmentId" | "id" | "lineage" | "projectId">,
+>(
+  threads: readonly T[],
+  nesting: SidebarNesting,
+  collapsedKeys: ReadonlySet<string>,
+  hidden: T[],
+): T[] {
+  const keyOf = (thread: T) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+  const byKey = new Map(threads.map((thread) => [keyOf(thread), thread] as const));
+  // Project folders split the list, so a child only nests beside a parent in its own project.
+  const listedParentKey = (thread: T) => {
+    const parentId = thread.lineage.parentThreadId;
+    if (parentId === null) return null;
+    const parentKey = scopedThreadKey(scopeThreadRef(thread.environmentId, parentId));
+    return byKey.get(parentKey)?.projectId === thread.projectId ? parentKey : null;
+  };
+  const childrenByParentKey = new Map<string, T[]>();
+  for (const thread of threads) {
+    const parentKey = listedParentKey(thread);
+    if (parentKey === null) continue;
+    const siblings = childrenByParentKey.get(parentKey);
+    if (siblings === undefined) childrenByParentKey.set(parentKey, [thread]);
+    else siblings.push(thread);
+  }
+  if (childrenByParentKey.size === 0) return [...threads];
+  const nested: T[] = [];
+  const placed = new Set<string>();
+  const place = (thread: T, guides: string, visible: boolean) => {
+    const key = keyOf(thread);
+    if (placed.has(key)) return;
+    placed.add(key);
+    (visible ? nested : hidden).push(thread);
+    if (guides !== "") nesting.guidesByKey.set(key, guides);
+    const children = childrenByParentKey.get(key) ?? [];
+    if (children.length === 0) return;
+    nesting.childCountByKey.set(key, children.length);
+    const childrenVisible = visible && !collapsedKeys.has(key);
+    children.forEach((child, index) =>
+      place(child, guides + (index < children.length - 1 ? "1" : "0"), childrenVisible),
+    );
+  };
+  for (const thread of threads) if (listedParentKey(thread) === null) place(thread, "", true);
+  // A lineage cycle has no root to start from; list its members flat.
+  for (const thread of threads) place(thread, "", true);
+  return nested;
+}
+
 /**
  * `delegatedUnderParent` holds the tasks linked environments run for a thread
  * the sidebar lists, by thread key; they show under that thread, as subagents do.

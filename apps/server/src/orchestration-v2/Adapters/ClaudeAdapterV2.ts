@@ -41,6 +41,7 @@ import {
   type ElicitationRequest,
   type ElicitationResult,
   forkSession as forkClaudeSession,
+  renameSession as renameClaudeSession,
   type EffortLevel,
   type ForkSessionOptions,
   type ForkSessionResult,
@@ -675,6 +676,13 @@ export interface ClaudeAgentSdkQueryRunnerShape {
   readonly subagentLaunchToolUseId: (
     input: ClaudeAgentSdkSubagentLookupInput,
   ) => Effect.Effect<string | null, ClaudeAgentSdkQueryRunnerError>;
+  /** Writes the session title Claude Code lists in its resume pickers. */
+  readonly renameSession?: (input: {
+    readonly sessionId: string;
+    readonly title: string;
+    readonly dir: string | null;
+    readonly environment: NodeJS.ProcessEnv;
+  }) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly assertComplete: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
 }
 
@@ -1095,9 +1103,9 @@ const claudeConfigDirOf = (
 // The SDK reads CLAUDE_CONFIG_DIR from process.env. Isolate custom homes in a
 // worker so concurrent providers keep the server's environment.
 const runClaudeWorker = Effect.fn("runClaudeWorker")(function* (input: {
-  readonly method: "forkSession";
+  readonly method: "forkSession" | "renameSession";
   readonly sessionId: string;
-  readonly options?: ForkSessionOptions;
+  readonly options?: ForkSessionOptions | { readonly title: string; readonly dir?: string };
   readonly environment: NodeJS.ProcessEnv;
 }) {
   const path = yield* Path.Path;
@@ -1555,6 +1563,26 @@ export const layerQueryRunner: Layer.Layer<
             }),
           ),
       ),
+      renameSession: Effect.fn("ClaudeAgentSdkQueryRunner.renameSession")(function* (input) {
+        const hostEnvironment = yield* HostProcess.Environment;
+        const homeDirectory = yield* HostProcess.HomeDirectory;
+        const dirOption = input.dir === null ? {} : { dir: input.dir };
+        // Like forks, a custom CLAUDE_CONFIG_DIR is only honored inside the worker.
+        const rename: Effect.Effect<unknown, unknown> =
+          claudeConfigDirOf(path, input.environment, homeDirectory) ===
+          claudeConfigDirOf(path, hostEnvironment, homeDirectory)
+            ? Effect.tryPromise(() => renameClaudeSession(input.sessionId, input.title, dirOption))
+            : runClaudeWorker({
+                method: "renameSession",
+                sessionId: input.sessionId,
+                options: { title: input.title, ...dirOption },
+                environment: input.environment,
+              }).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                Effect.provideService(Path.Path, path),
+              );
+        yield* rename.pipe(Effect.mapError((cause) => queryRunnerError(cause, "renameSession")));
+      }),
       forkSession: Effect.fn("ClaudeAgentSdkQueryRunner.forkSession")(function* (
         input: ClaudeAgentSdkSessionForkInput,
       ) {
@@ -1677,6 +1705,20 @@ function claudeLiveSelectionFlagSettings(
     fastMode: selection.settings.fastMode ?? null,
     ultracode: selection.settings.ultracode ?? null,
   };
+}
+
+// Claude has no per-turn side channel like Codex's additionalContext, so T3's own context (not
+// MCP apps', which Claude never received) follows the user's text. Slash commands stay clean.
+export function withClaudeAppContext(
+  text: string,
+  appContext: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"],
+): string {
+  const t3Context = (appContext ?? []).filter((entry) => entry.key.startsWith("t3_"));
+  if (t3Context.length === 0 || text.trimStart().startsWith("/")) return text;
+  const blocks = t3Context.map(
+    (entry) => `<t3_context name="${entry.key}">\n${entry.text}\n</t3_context>`,
+  );
+  return [text, ...blocks].join("\n\n");
 }
 
 // A delegated child is its own SDK session, so Claude Code gives it the main-conversation cache
@@ -5020,9 +5062,31 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
       Effect.provideService(Path.Path, path),
     );
 
+  const renameSession = adapterOptions.queryRunner.renameSession;
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
     driver: CLAUDE_PROVIDER,
+    ...(renameSession === undefined
+      ? {}
+      : {
+          renameThread: Effect.fn("ClaudeAdapterV2.renameThread")(function* (renameInput) {
+            const sessionId = yield* getNativeThreadId(renameInput.providerThread);
+            yield* renameSession({
+              sessionId,
+              title: renameInput.title,
+              dir: renameInput.cwd,
+              environment: adapterOptions.environment,
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CLAUDE_PROVIDER,
+                    detail: `Could not rename Claude session ${sessionId}: ${cause.message}`,
+                  }),
+              ),
+            );
+          }),
+        }),
     getCapabilities: Effect.fn("ClaudeAdapterV2.getCapabilities")(function () {
       return Effect.succeed(ClaudeProviderCapabilitiesV2);
     }),
@@ -11089,9 +11153,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               promptUuid === null
                 ? null
                 : yield* makeClaudeUserMessageWithAttachments({
-                    text: applyClaudePromptEffortPrefix(
-                      turnInput.message.text,
-                      compileClaudeModelSelection(turnInput.modelSelection).promptEffort,
+                    text: withClaudeAppContext(
+                      applyClaudePromptEffortPrefix(
+                        turnInput.message.text,
+                        compileClaudeModelSelection(turnInput.modelSelection).promptEffort,
+                      ),
+                      turnInput.appContext,
                     ),
                     attachments: turnInput.message.attachments,
                     attachmentsDir,

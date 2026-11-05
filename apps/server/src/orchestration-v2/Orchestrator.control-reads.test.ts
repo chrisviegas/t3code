@@ -1571,3 +1571,115 @@ it.effect("dispatch records the command outcome and its duration", () =>
     assert.strictEqual((yield* durations).count - durationsBefore, 1);
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("a spawned thread nests under its creator, takes a group, and can detach", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const parentId = ThreadId.make("lineage-parent");
+    const childId = ThreadId.make("lineage-child");
+    const create = (threadId: ThreadId, extra: { spawnedFrom?: ThreadId; groupId?: string }) =>
+      orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`create-${threadId}`),
+        threadId,
+        projectId: ProjectId.make("project:lineage"),
+        title: threadId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent",
+        creationSource: "mcp",
+        ...extra,
+      });
+    yield* create(parentId, {});
+    yield* create(childId, { spawnedFrom: parentId, groupId: "grp-a" });
+    const spawned = yield* projections.getThread(childId);
+    assert.deepEqual(spawned.lineage, {
+      parentThreadId: parentId,
+      relationshipToParent: "spawned",
+      rootThreadId: childId,
+    });
+    assert.equal(spawned.groupId, "grp-a");
+
+    yield* orchestrator.dispatch({
+      type: "thread.group.set",
+      commandId: CommandId.make("ungroup-child"),
+      threadId: childId,
+      groupId: null,
+    });
+    assert.isNull((yield* projections.getThread(childId)).groupId);
+
+    yield* orchestrator.dispatch({
+      type: "thread.lineage.detach",
+      commandId: CommandId.make("detach-child"),
+      threadId: childId,
+    });
+    assert.deepEqual((yield* projections.getThread(childId)).lineage, {
+      parentThreadId: null,
+      relationshipToParent: null,
+      rootThreadId: childId,
+    });
+
+    const refused = yield* orchestrator
+      .dispatch({
+        type: "thread.lineage.detach",
+        commandId: CommandId.make("detach-root"),
+        threadId: parentId,
+      })
+      .pipe(Effect.result);
+    assert.isTrue(Result.isFailure(refused));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a new title on a thread with a provider thread queues one provider rename", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("rename-provider-thread");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-rename-provider-thread"),
+      threadId,
+      projectId: ProjectId.make("project:rename"),
+      title: "Old title",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const thread = yield* projections.getThread(threadId);
+    yield* projections.apply({
+      id: EventId.make("attach-provider-thread:rename"),
+      type: "thread.metadata-updated",
+      threadId,
+      providerInstanceId: instanceId,
+      occurredAt: thread.updatedAt,
+      payload: {
+        ...thread,
+        activeProviderThreadId: ProviderThreadId.make("provider-thread:rename"),
+      },
+    });
+    const rename = (commandId: string, title: string) =>
+      orchestrator
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(commandId),
+          threadId,
+          title,
+        })
+        .pipe(Effect.andThen(outbox.listByCommandId(CommandId.make(commandId))));
+
+    assert.deepEqual(
+      (yield* rename("rename:new", "New title")).map((effect) => effect.request),
+      [{ type: "provider-thread.rename" }],
+    );
+    assert.deepEqual(yield* rename("rename:same", "New title"), []);
+  }).pipe(Effect.provide(layerTest)),
+);

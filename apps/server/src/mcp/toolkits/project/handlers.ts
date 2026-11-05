@@ -244,6 +244,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               }),
           createdBy: "agent",
           creationSource: "mcp",
+          // Spawned work starts in its creator's sidebar group.
+          ...(caller === undefined ? {} : { spawnedFrom: caller.id, groupId: caller.groupId }),
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),

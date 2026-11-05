@@ -23,6 +23,8 @@ import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadToolkit } from "./tools.ts";
+import * as Settings from "../../../serverSettings.ts";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 
 function queueEntry(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
@@ -89,6 +91,30 @@ const required = <A>(value: A | undefined, name: string) =>
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
+
+// Matches a group by id, then by name ignoring case; an unknown name becomes a new group.
+// ponytail: read-then-write on settings, so two agents creating one name at once can both add it.
+const resolveOrCreateThreadGroup = Effect.fn("mcp.resolveOrCreateThreadGroup")(function* (
+  wanted: string,
+) {
+  const settings = yield* Settings.ServerSettingsService;
+  const unavailable = () =>
+    new OrchestratorMcpFailure({
+      code: "orchestration_error",
+      message: "Unable to read or save thread groups.",
+    });
+  const groups = (yield* settings.getSettings.pipe(Effect.mapError(unavailable))).threadGroups;
+  const existing =
+    groups.find((group) => group.id === wanted) ??
+    groups.find((group) => group.name.toLocaleLowerCase() === wanted.toLocaleLowerCase());
+  if (existing !== undefined) return existing.id;
+  const random = yield* SecureRandom.SecureRandom;
+  const created = { id: `grp-${yield* random.uuidV4()}`, name: wanted };
+  yield* settings
+    .updateSettings({ threadGroups: [...groups, created] })
+    .pipe(Effect.mapError(unavailable));
+  return created.id;
+});
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
@@ -340,6 +366,22 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return yield* threads
           .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
           .pipe(Effect.mapError(dispatchFailure));
+      }
+      if (input.action === "move_to_group" || input.action === "remove_from_group") {
+        let groupId: string | null = null;
+        if (input.action === "move_to_group") {
+          if (input.group === undefined) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "move_to_group requires group.",
+            });
+          }
+          groupId = yield* resolveOrCreateThreadGroup(input.group);
+        }
+        const result = yield* threads
+          .dispatch({ ...common, type: "thread.group.set", groupId })
+          .pipe(Effect.mapError(dispatchFailure));
+        return { sequence: result.sequence };
       }
       let command: OrchestrationV2Command;
       switch (input.action) {

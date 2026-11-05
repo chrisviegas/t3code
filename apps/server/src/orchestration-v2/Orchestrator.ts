@@ -570,6 +570,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.tag.set":
     case "thread.visit":
     case "thread.mark-unread":
+    case "thread.lineage.detach":
+    case "thread.group.set":
     case "thread.metadata.update":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
@@ -2869,13 +2871,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       activeProviderThreadId: null,
       pullRequests: [],
       ...(command.linkOrigin === undefined ? {} : { linkOrigin: command.linkOrigin }),
+      ...(command.groupId == null ? {} : { groupId: command.groupId }),
       // Only stamped work names a remote parent, so a client cannot claim one.
       ...(command.linkOrigin === undefined || command.delegatedFrom === undefined
         ? {}
         : { delegatedFrom: command.delegatedFrom }),
+      // A spawned thread nests under its creator but keeps its own root: it is not part of
+      // the creator's fork/subagent family.
       lineage: {
-        parentThreadId: null,
-        relationshipToParent: null,
+        parentThreadId: command.spawnedFrom ?? null,
+        relationshipToParent: command.spawnedFrom === undefined ? null : "spawned",
         rootThreadId: command.threadId,
       },
       forkedFrom: null,
@@ -3154,6 +3159,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.tag.set"
           | "thread.active.reorder"
           | "thread.mark-unread"
+          | "thread.lineage.detach"
+          | "thread.group.set"
           | "thread.metadata.update"
           | "thread.pull-request.link"
           | "thread.pull-request.unlink"
@@ -3557,6 +3564,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       snoozedUntil = parsedSnoozedUntil.value;
     }
+    if (
+      command.type === "thread.lineage.detach" &&
+      (thread.lineage.parentThreadId === null ||
+        thread.lineage.sideChat === true ||
+        (thread.lineage.relationshipToParent !== "fork" &&
+          thread.lineage.relationshipToParent !== "spawned"))
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is not a fork or spawned thread with a parent.`,
+      });
+    }
     let markUnreadVisitedAt: DateTime.Utc | null = null;
     if (command.type === "thread.mark-unread") {
       const shell = yield* projectionStore
@@ -3702,6 +3722,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : current.filter((tag) => tag !== command.tag),
           };
         }
+        case "thread.group.set":
+          return { ...thread, groupId: command.groupId };
+        case "thread.lineage.detach":
+          // The root stays: a detached fork still shares its family's storage and history.
+          return {
+            ...thread,
+            lineage: { ...thread.lineage, parentThreadId: null, relationshipToParent: null },
+          };
         case "thread.mark-unread": {
           // Retire the wake before rewinding the visit, preserving its settlement timer.
           const snoozeExpired =
@@ -4078,6 +4106,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.mark-unread":
           return "thread.marked-unread" as const;
         case "thread.metadata.update":
+        case "thread.lineage.detach":
+        case "thread.group.set":
         case "thread.title.regeneration.complete":
           return "thread.metadata-updated" as const;
         case "thread.pull-request.link":
@@ -4116,6 +4146,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         pendingThreadTitleGenerationEffect(command.commandId, command.threadId, {
           type: "regenerate",
         }),
+      ]);
+    }
+    if (updatedThread.title !== thread.title && updatedThread.activeProviderThreadId !== null) {
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:provider-thread.rename`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: { type: "provider-thread.rename" as const },
+        },
       ]);
     }
 
@@ -13255,6 +13296,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.active.reorder":
       case "thread.tag.set":
       case "thread.mark-unread":
+      case "thread.lineage.detach":
+      case "thread.group.set":
       case "thread.metadata.update":
       case "thread.pull-request.link":
       case "thread.pull-request.unlink":

@@ -6,6 +6,11 @@ export type ThreadActionMenuId =
   | "new-thread-on-branch"
   | "filter-by-project"
   | "turn-into-project"
+  | "detach-from-parent"
+  | "group"
+  | "group:none"
+  | "group:new"
+  | `group:set:${string}`
   | "project-settings"
   | "pin"
   | "unpin"
@@ -95,6 +100,26 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /** A fork or agent-spawned thread nested under its parent. */
+  readonly canDetachFromParent?: boolean;
+  /** The thread's environment's groups; absent where groups are not offered. */
+  readonly groups?: {
+    readonly items: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+    readonly currentGroupId: string | null;
+  };
+}
+
+/** Forks and agent-spawned threads can leave their parent; subagents and side chats cannot. */
+export function threadCanDetachFromParent(lineage: {
+  readonly parentThreadId: string | null;
+  readonly relationshipToParent: string | null;
+  readonly sideChat?: boolean | undefined;
+}): boolean {
+  return (
+    lineage.parentThreadId !== null &&
+    lineage.sideChat !== true &&
+    (lineage.relationshipToParent === "fork" || lineage.relationshipToParent === "spawned")
+  );
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -199,6 +224,34 @@ export function buildThreadActionMenuItems(
             label: "Turn into project",
             icon: "folder-plus",
             disabled: state.isRunning,
+          },
+        ]
+      : []),
+    ...(state.canDetachFromParent
+      ? [{ id: "detach-from-parent" as const, label: "Detach from parent", icon: "unlink" }]
+      : []),
+    ...(state.groups
+      ? [
+          {
+            id: "group" as const,
+            label: "Move to group",
+            icon: "folder-tree",
+            children: [
+              ...state.groups.items.map((group) => ({
+                id: `group:set:${group.id}` as const,
+                label: group.name,
+                checked: group.id === state.groups?.currentGroupId,
+              })),
+              ...(state.groups.currentGroupId !== null &&
+              state.groups.items.some((group) => group.id === state.groups?.currentGroupId)
+                ? [{ id: "group:none" as const, label: "Remove from group" }]
+                : []),
+              {
+                id: "group:new" as const,
+                label: "New group…",
+                separatorBefore: state.groups.items.length > 0,
+              },
+            ],
           },
         ]
       : []),
