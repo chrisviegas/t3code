@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "./config.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const encodeThemeFile = Schema.encodeSync(Schema.fromJsonString(EnvironmentThemeFile));
 
@@ -58,6 +59,8 @@ const withEnvironmentThemes = <A, E>(
           Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
         ),
       ),
+      // Keeps the machine's own Omarchy theme out of these themes.
+      Effect.provideService(HostProcess.HomeDirectory, baseDir),
     );
   }).pipe(Effect.scoped);
 
@@ -85,6 +88,35 @@ it.layer(NodeServices.layer)("environment theme", (it) => {
         assert.deepEqual(
           (yield* currentThemes).map((theme) => theme.id),
           ["shared-light"],
+        );
+      }),
+    ),
+  );
+
+  it.effect("publishes Omarchy's rendered palette unless omarchy.json is published", () =>
+    withEnvironmentThemes(
+      {},
+      Effect.gen(function* () {
+        const { environmentThemesDir } = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const omarchy = EnvironmentTheme.omarchyThemePaths(yield* HostProcess.HomeDirectory);
+        assert.deepEqual(yield* currentThemes, []);
+
+        yield* fs.makeDirectory(path.dirname(omarchy.file), { recursive: true });
+        yield* fs.writeFileString(omarchy.file, encodeThemeFile(NIGHTFALL_THEME));
+        assert.deepEqual(
+          (yield* currentThemes).map((theme) => [theme.id, theme.name]),
+          [["omarchy", "Nightfall"]],
+        );
+
+        yield* fs.writeFileString(
+          path.join(environmentThemesDir, "omarchy.json"),
+          encodeThemeFile(SHARED_THEME),
+        );
+        assert.deepEqual(
+          (yield* currentThemes).map((theme) => [theme.id, theme.name]),
+          [["omarchy", "Shared Light"]],
         );
       }),
     ),
