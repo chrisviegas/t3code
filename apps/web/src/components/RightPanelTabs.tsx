@@ -46,6 +46,7 @@ import {
   MessagesSquare,
   Plus,
   TerminalSquare,
+  Activity,
 } from "lucide-react";
 import { Volume2, VolumeOff } from "lucide";
 import {
@@ -594,6 +595,8 @@ function surfaceTitle(
       return surface.title ?? surface.target?.name ?? "Device";
     case "side-chat":
       return "Side chat";
+    case "tasks":
+      return "Background";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -672,6 +675,8 @@ function SurfaceIcon({
       );
     case "terminal":
       return <TerminalSquare className="size-3 shrink-0" />;
+    case "tasks":
+      return <Activity className="size-3 shrink-0" />;
     case "pull-request":
       return (
         <PullRequestSurfaceIcon

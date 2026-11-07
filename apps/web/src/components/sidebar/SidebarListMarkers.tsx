@@ -8,18 +8,21 @@ import {
   sidebarMarkerId,
   type SidebarListMarker,
 } from "../Sidebar.logic";
-import { SIDEBAR_SORTABLE_DRAG_DISABLED } from "./SidebarThreadRow";
+import { SIDEBAR_SORTABLE_DRAG_DISABLED, SIDEBAR_SORTABLE_DRAG_ENABLED } from "./SidebarThreadRow";
 
-function SortableSidebarMarker(props: {
-  marker: SidebarListMarker;
+export function SortableSidebarMarker(props: {
+  /** A list marker, or another fixed row's sortable id. */
+  marker: SidebarListMarker | { id: string };
   className?: string;
   children?: ReactNode;
   revealOverflow?: boolean;
+  /** Lets the marker itself be dragged, as a group header is. */
+  draggable?: boolean;
   "data-testid"?: string;
 }) {
-  const { node, setNodeRef, transform, transition } = useSortable({
-    id: sidebarMarkerId(props.marker),
-    disabled: SIDEBAR_SORTABLE_DRAG_DISABLED,
+  const { node, setNodeRef, transform, transition, listeners, isDragging } = useSortable({
+    id: typeof props.marker === "string" ? sidebarMarkerId(props.marker) : props.marker.id,
+    disabled: props.draggable ? SIDEBAR_SORTABLE_DRAG_ENABLED : SIDEBAR_SORTABLE_DRAG_DISABLED,
     animateLayoutChanges: animateSidebarLayoutChanges,
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the projected drop box inside the scroll viewport as drag transforms move it
@@ -33,10 +36,14 @@ function SortableSidebarMarker(props: {
       ref={setNodeRef}
       data-thread-selection-safe
       data-testid={props["data-testid"]}
-      className={cn("list-none", props.className)}
+      {...(props.draggable ? listeners : {})}
+      className={cn("list-none", props.className, isDragging && "relative z-20")}
       style={{
         transform: CSS.Translate.toString(transform),
-        transition: props.marker.endsWith("-placeholder") ? "none" : transition,
+        transition:
+          typeof props.marker === "string" && props.marker.endsWith("-placeholder")
+            ? "none"
+            : transition,
         visibility: transform?.scaleY === 0 ? "hidden" : undefined,
       }}
     >
@@ -76,6 +83,8 @@ export function SidebarDragBoundary(props: {
   marker: "pinned-header" | "pinned-divider";
   label: string;
   visible: boolean;
+  /** Not drawn, but still marks the Pinned boundary the drag reads. */
+  labelHidden?: boolean;
   isDropTarget: boolean;
 }) {
   return (
@@ -85,7 +94,12 @@ export function SidebarDragBoundary(props: {
       className="pointer-events-none relative mx-0.5 -mb-px h-0"
     >
       {props.visible ? (
-        <div className="sidebar-drag-boundary-label absolute inset-x-2 top-1 flex h-4 items-center gap-2">
+        <div
+          className={cn(
+            "sidebar-drag-boundary-label absolute inset-x-2 top-1 flex h-4 items-center gap-2",
+            props.labelHidden && "invisible",
+          )}
+        >
           <span
             className={cn(
               "shrink-0 text-xs font-medium",

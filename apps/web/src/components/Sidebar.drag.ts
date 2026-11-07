@@ -2,6 +2,7 @@ import { closestCenter, type CollisionDetection, type Modifier } from "@dnd-kit/
 import { verticalListSortingStrategy, type SortingStrategy } from "@dnd-kit/sortable";
 import {
   resolveSidebarDropTarget,
+  resolveSidebarGroupTarget,
   sidebarListItemId,
   sidebarMarkerId,
   type SidebarListItem,
@@ -43,7 +44,9 @@ export function createSidebarCollisionDetection(
     let collisions = closestCenter(args);
     const pointer = args.pointerCoordinates;
     const items = options.items;
-    const source = items?.find((item) => item.kind === "thread" && item.key === args.active.id);
+    const found = items?.find((item) => sidebarListItemId(item) === args.active.id);
+    const source =
+      found?.kind === "group" ? { kind: "thread" as const, section: "active" as const } : found;
     const boundary = args.droppableContainers
       .find((container) => container.id === sidebarMarkerId("pinned-divider"))
       ?.node.current?.querySelector(".sidebar-drag-boundary-label")
@@ -66,9 +69,20 @@ export function createSidebarCollisionDetection(
           const target = collisions.find((collision) => {
             const id = String(collision.id);
             if (!sections.has(id)) {
+              const item = items.find((candidate) => sidebarListItemId(candidate) === id);
+              // Groups drawn in the Working shelf sit below it, never in the Active zone.
+              const workingHeader = items.findIndex(
+                (candidate) => candidate.kind === "marker" && candidate.marker === "working-header",
+              );
+              const inWorkingShelf =
+                item?.kind === "group" &&
+                workingHeader !== -1 &&
+                items.indexOf(item) > workingHeader;
               sections.set(
                 id,
-                resolveSidebarDropTarget(items, String(args.active.id), id)?.section ?? null,
+                inWorkingShelf
+                  ? null
+                  : (resolveSidebarDropTarget(items, String(args.active.id), id)?.section ?? null),
               );
             }
             return sections.get(id) === boundarySection;
@@ -101,6 +115,8 @@ export function createSidebarSortingStrategy(input: {
   cardHeight?: number;
   slimHeight?: number;
   boundaryLabelHeight?: number;
+  /** Markers not drawn in this list, so they take no room. */
+  hiddenMarkers?: ReadonlySet<SidebarListMarker>;
 }): SortingStrategy {
   if (input.enabled === false) return () => stationary;
   const { items } = input;
@@ -108,12 +124,83 @@ export function createSidebarSortingStrategy(input: {
   let previous: Pick<Layout, "rects" | "activeIndex" | "overIndex"> | undefined;
   let transforms: ReturnType<SortingStrategy>[] | null = [];
 
+  // A dragged group header carries its block (its rows follow the pointer in the row itself);
+  // the other groups make room.
+  function projectGroups({ rects, activeIndex, overIndex }: Layout, draggedGroup: string) {
+    const over = items[overIndex];
+    const order: string[] = [];
+    for (const item of items) {
+      if (item.kind === "group" && item.key === undefined) order.push(item.groupKey);
+    }
+    const from = order.indexOf(draggedGroup);
+    const to = over?.kind === "group" ? order.indexOf(over.groupKey) : -1;
+    const result: ReturnType<SortingStrategy>[] = items.map(() => stationary);
+    const firstIndex = items.findIndex((item) => item.kind === "group");
+    const firstRect = rects[firstIndex];
+    if (from === -1 || to === -1 || !firstRect) return result;
+    order.splice(to, 0, ...order.splice(from, 1));
+    let top = firstRect.top;
+    for (const groupKey of order) {
+      for (const [index, item] of items.entries()) {
+        if (item.kind !== "group" || item.groupKey !== groupKey) continue;
+        const rect = rects[index];
+        if (!rect) continue;
+        result[index] = { ...stationary, y: top - rect.top };
+        top += rect.height + 1;
+      }
+    }
+    result[activeIndex] = stationary;
+    return result;
+  }
+
   function project({ rects, activeIndex, overIndex }: Layout) {
-    const active = items[activeIndex];
-    const over = items[overIndex] ?? active;
-    if (active?.kind !== "thread" || !over || !rects[0]) return [];
-    const target = resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
-    if (!target) return [];
+    const dragged = items[activeIndex];
+    if (dragged?.kind === "group" && dragged.key === undefined) {
+      return projectGroups({ rects, activeIndex, overIndex } as Layout, dragged.groupKey);
+    }
+    // A grouped row drags like an active one.
+    const active: ThreadItem | undefined =
+      dragged?.kind === "group" && dragged.key !== undefined
+        ? { kind: "thread", key: dragged.key, section: "active" }
+        : dragged?.kind === "thread"
+          ? dragged
+          : undefined;
+    const over = items[overIndex] ?? dragged;
+    if (active === undefined || !over || !rects[0]) return [];
+    const target =
+      over === dragged
+        ? null
+        : resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
+    const overGroup =
+      target === null ? null : resolveSidebarGroupTarget(items, sidebarListItemId(over));
+    // Into another group the row moves whole, so no slot opens there: the group is outlined
+    // instead and the row's old place stays empty until the drop. With no valid target (over
+    // itself) the row also holds its place; an empty projection would snap every row back and
+    // shake the list at boundaries.
+    const intoOtherGroup =
+      overGroup !== null && (dragged?.kind !== "group" || dragged.groupKey !== overGroup);
+    const holdsPlace = target === null || intoOtherGroup;
+    const targetGroup = holdsPlace ? null : overGroup;
+    // Group blocks keep their place; a drop into one opens a slot under the pointer: below the
+    // header, or above the hovered row.
+    const groupItems: SidebarListItem[] = [];
+    for (const item of items) {
+      if (item.kind !== "group") continue;
+      if (item === dragged) {
+        if (holdsPlace) groupItems.push(active);
+        continue;
+      }
+      const slotHere = targetGroup !== null && item === over;
+      // Moving down within its own group, the slot opens below the hovered row.
+      const below =
+        item.key === undefined ||
+        (dragged?.kind === "group" &&
+          dragged.groupKey === item.groupKey &&
+          items.indexOf(item) > items.indexOf(dragged));
+      if (slotHere && !below) groupItems.push(active);
+      groupItems.push(item);
+      if (slotHere && below) groupItems.push(active);
+    }
     const groups: Record<SidebarSection, ThreadItem[]> = {
       pinned: [],
       active: [],
@@ -125,6 +212,7 @@ export function createSidebarSortingStrategy(input: {
     let slimHeight = input.slimHeight;
     let headerScale: number | undefined;
     for (const [index, item] of items.entries()) {
+      if (item.kind === "group") continue;
       if (item.kind === "marker") {
         if (isShelfHeader(item)) {
           const height = rects[index]?.height;
@@ -135,29 +223,33 @@ export function createSidebarSortingStrategy(input: {
       if (item.section === "pinned" || item.section === "active" || item.section === "working")
         cardHeight ??= rects[index]?.height;
       else slimHeight ??= rects[index]?.height;
-      if (item.key !== active.key) groups[item.section].push(item);
+      if (item.key !== active.key || holdsPlace) groups[item.section].push(item);
     }
     const scale =
       slimHeight !== undefined ? slimHeight / 36 : (headerScale ?? (cardHeight ?? 82) / 82);
     cardHeight ??= 82 * scale;
     slimHeight ??= 36 * scale;
     const labelHeight = (input.boundaryLabelHeight ?? 0) * scale;
-    const group = groups[target.section];
-    const order =
-      target.section === "pinned"
-        ? target.pinnedOrder
-        : target.section === "settled"
-          ? input.settledOrder
-          : (input.activeOrder ?? target.activeOrder);
-    const ranks = new Map(order.map((key, index) => [key, index]));
-    const rank = ranks.get(active.key) ?? Number.POSITIVE_INFINITY;
-    const index = group.findIndex(
-      (item) => (ranks.get(item.key) ?? Number.POSITIVE_INFINITY) > rank,
-    );
-    group.splice(index < 0 ? group.length : index, 0, { ...active, section: target.section });
+    if (target !== null && targetGroup === null && !holdsPlace) {
+      const group = groups[target.section];
+      const order =
+        target.section === "pinned"
+          ? target.pinnedOrder
+          : target.section === "settled"
+            ? input.settledOrder
+            : (input.activeOrder ?? target.activeOrder);
+      const ranks = new Map(order.map((key, index) => [key, index]));
+      const rank = ranks.get(active.key) ?? Number.POSITIVE_INFINITY;
+      const index = group.findIndex(
+        (item) => (ranks.get(item.key) ?? Number.POSITIVE_INFINITY) > rank,
+      );
+      group.splice(index < 0 ? group.length : index, 0, { ...active, section: target.section });
+    }
+    const landsInSettled =
+      (holdsPlace || target === null ? active.section : target.section) === "settled";
     const settledOrder = (
       input.settledOrder.length > 0 ? input.settledOrder : groups.settled.map((item) => item.key)
-    ).filter((key) => key !== active.key || target.section === "settled");
+    ).filter((key) => key !== active.key || landsInSettled);
     const visible = input.settledExpanded
       ? settledOrder.slice(0, input.settledVisibleCount ?? settledOrder.length)
       : [];
@@ -174,11 +266,22 @@ export function createSidebarSortingStrategy(input: {
     };
     marker("pinned-header");
     projected.push(...groups.pinned);
+    const workingHeaderIndex = items.findIndex(
+      (item) => item.kind === "marker" && item.marker === "working-header",
+    );
+    const groupsInWorking =
+      workingHeaderIndex !== -1 &&
+      items.findIndex((item) => item.kind === "group") > workingHeaderIndex;
     marker("pinned-divider");
+    if (!groupsInWorking) projected.push(...groupItems);
+    if (items.some((item) => item.kind === "marker" && item.marker === "ungrouped-header")) {
+      marker("ungrouped-header");
+    }
     section("active");
-    if (items.some((item) => item.kind === "marker" && item.marker === "working-header")) {
+    if (workingHeaderIndex !== -1) {
       marker("working-header");
       projected.push(...groups.working);
+      if (groupsInWorking) projected.push(...groupItems);
     }
     if (
       groups.snoozed.length > 0 ||
@@ -199,6 +302,7 @@ export function createSidebarSortingStrategy(input: {
           ? cardHeight
           : slimHeight;
       const moved = item.kind === "thread" && item.key === active.key;
+      if (item.kind === "marker" && input.hiddenMarkers?.has(item.marker)) return 0;
       return item.kind === "marker" &&
         (item.marker === "pinned-header" || item.marker === "pinned-divider")
         ? labelHeight
@@ -208,7 +312,12 @@ export function createSidebarSortingStrategy(input: {
             ? fallback
             : (rect?.height ?? fallback);
     });
-    const firstShelf = items.findIndex(isShelfHeader);
+    // The shelf that floats to the bottom is the first one with a gap above it.
+    const firstShelf = items.findIndex(
+      (item, index) =>
+        isShelfHeader(item) &&
+        (rects[index]?.top ?? 0) > (rects[index - 1]?.bottom ?? Number.POSITIVE_INFINITY) + 1,
+    );
     const shelfRect = rects[firstShelf];
     const beforeShelf = rects[firstShelf - 1];
     const lastRect = rects.at(-1);
@@ -222,7 +331,11 @@ export function createSidebarSortingStrategy(input: {
     const result = items.map(() => hidden);
     let top = rects[0].top;
     for (const [projectedIndex, item] of projected.entries()) {
-      if (isShelfHeader(item)) {
+      // The floating shelf may have left the projection (its last row dragged out); the next one floats.
+      if (
+        isShelfHeader(item) &&
+        (indices.get(sidebarListItemId(item)) ?? Number.POSITIVE_INFINITY) >= firstShelf
+      ) {
         top += shelfSpace;
         shelfSpace = 0;
       }

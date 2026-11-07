@@ -30,6 +30,7 @@ import {
   type ThreadSnoozeShell,
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
+  generateSpreadPinOrderKeys,
   getThreadSortTimestamp,
   planPinnedReorder,
   sortThreads,
@@ -215,6 +216,8 @@ export type SidebarListMarker =
   | "active-placeholder"
   | "settled-placeholder"
   | "pinned-divider"
+  /** Titles the threads in no group, below the groups. */
+  | "ungrouped-header"
   | "working-header"
   | "snoozed-header"
   | "settled-header";
@@ -225,10 +228,43 @@ export function sidebarMarkerId(marker: SidebarListMarker): string {
 
 export type SidebarListItem =
   | { readonly kind: "thread"; readonly key: string; readonly section: SidebarSection }
-  | { readonly kind: "marker"; readonly marker: SidebarListMarker };
+  | { readonly kind: "marker"; readonly marker: SidebarListMarker }
+  // A thread group's header (no `key`) or one of its rows. Groups sit at the top of the
+  // active section; they are drop targets, not part of the active order.
+  | { readonly kind: "group"; readonly groupKey: string; readonly key?: string };
+
+export function sidebarGroupHeaderId(groupKey: string): string {
+  return `${SIDEBAR_MARKER_PREFIX}group:${groupKey}`;
+}
 
 export function sidebarListItemId(item: SidebarListItem): string {
+  if (item.kind === "group") return item.key ?? sidebarGroupHeaderId(item.groupKey);
   return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
+}
+
+/**
+ * Order keys that put a group's rows in `orderedKeys` order. Groups sort like Active, where a
+ * keyless row sorts first, so a group with any keyless row is keyed whole.
+ */
+export function planSidebarGroupReorder(
+  orderedKeys: readonly string[],
+  keysById: ReadonlyMap<string, string | null | undefined>,
+  movedKey: string,
+): ReadonlyArray<{ readonly id: string; readonly orderKey: string }> {
+  if (orderedKeys.some((key) => keysById.get(key) == null)) {
+    const keys = generateSpreadPinOrderKeys(orderedKeys.length);
+    return orderedKeys.map((id, index) => ({ id, orderKey: keys[index]! }));
+  }
+  return planPinnedReorder({ orderedIds: orderedKeys, keysById, movedId: movedKey });
+}
+
+/** The group a drop over `overId` lands in, when that is a group header or grouped row. */
+export function resolveSidebarGroupTarget(
+  items: readonly SidebarListItem[],
+  overId: string,
+): string | null {
+  const over = items.find((item) => sidebarListItemId(item) === overId);
+  return over?.kind === "group" ? over.groupKey : null;
 }
 
 function sectionAtSidebarSlot(items: readonly SidebarListItem[], index: number): SidebarSection {
@@ -257,10 +293,18 @@ export function resolveSidebarDropTarget(
 ): SidebarDropTarget | null {
   const activeIndex = items.findIndex((item) => sidebarListItemId(item) === activeKey);
   const overIndex = items.findIndex((item) => sidebarListItemId(item) === overId);
-  if (activeIndex === -1 || overIndex === -1 || items[activeIndex]?.kind !== "thread") return null;
+  const dragged = items[activeIndex];
+  if (
+    activeIndex === -1 ||
+    overIndex === -1 ||
+    !(dragged?.kind === "thread" || (dragged?.kind === "group" && dragged.key !== undefined))
+  )
+    return null;
   const moved = items.filter((_, index) => index !== activeIndex);
   moved.splice(overIndex, 0, items[activeIndex]!);
-  const section = sectionAtSidebarSlot(moved, overIndex);
+  // Groups hold active threads wherever they are drawn, even inside the Working shelf.
+  const section =
+    items[overIndex]?.kind === "group" ? "active" : sectionAtSidebarSlot(moved, overIndex);
   if (section === "working" || section === "snoozed") return null;
   const pinnedOrder: string[] = [];
   const activeOrder: string[] = [];
@@ -274,8 +318,9 @@ export function resolveSidebarDropTarget(
         item.marker === "settled-header"
       )
         break;
-    } else if (currentSection === "pinned") pinnedOrder.push(item.key);
-    else activeOrder.push(item.key);
+    } else if (item.kind !== "thread" && item !== dragged) continue;
+    else if (currentSection === "pinned") pinnedOrder.push(sidebarListItemId(item));
+    else activeOrder.push(sidebarListItemId(item));
   }
   return { section, pinnedOrder, activeOrder };
 }
@@ -638,15 +683,19 @@ export function nestSidebarThreads<
   nesting: SidebarNesting,
   collapsedKeys: ReadonlySet<string>,
   hidden: T[],
+  options: { readonly acrossProjects?: boolean } = {},
 ): T[] {
   const keyOf = (thread: T) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   const byKey = new Map(threads.map((thread) => [keyOf(thread), thread] as const));
-  // Project folders split the list, so a child only nests beside a parent in its own project.
+  // Project folders split the list, so there a child only nests beside a parent in its own
+  // project. Elsewhere a thread an agent spawned in another project still nests under its parent.
   const listedParentKey = (thread: T) => {
     const parentId = thread.lineage.parentThreadId;
     if (parentId === null) return null;
     const parentKey = scopedThreadKey(scopeThreadRef(thread.environmentId, parentId));
-    return byKey.get(parentKey)?.projectId === thread.projectId ? parentKey : null;
+    const parent = byKey.get(parentKey);
+    if (parent === undefined) return null;
+    return options.acrossProjects || parent.projectId === thread.projectId ? parentKey : null;
   };
   const childrenByParentKey = new Map<string, T[]>();
   for (const thread of threads) {

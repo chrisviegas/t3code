@@ -24,6 +24,9 @@ import {
   sortInboxThreadsByReturn,
   resolveSidebarDropTarget,
   planSidebarThreadDrop,
+  planSidebarGroupReorder,
+  nestSidebarThreads,
+  emptySidebarNesting,
   resolveSidebarReorderableThreadKeys,
   sortPinnedThreadsForSidebar,
   sortScopedProjectsForSidebar,
@@ -1661,5 +1664,74 @@ describe("shouldCreateNewThreadInCurrentProject", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 1, 3)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(false, 0, 0)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(true, 2, 2)).toBe(true);
+  });
+});
+
+describe("planSidebarGroupReorder", () => {
+  const sortAfter = (
+    rows: ReadonlyArray<{ id: string; activeOrderKey: string | null }>,
+    order: readonly string[],
+    movedKey: string,
+  ) => {
+    const keysById = new Map(rows.map((row) => [row.id, row.activeOrderKey] as const));
+    const written = new Map(
+      planSidebarGroupReorder(order, keysById, movedKey).map(({ id, orderKey }) => [id, orderKey]),
+    );
+    return sortActiveThreadsByOrderKey(
+      rows.map((row) => ({
+        ...row,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        activeOrderKey: written.get(row.id) ?? row.activeOrderKey,
+      })),
+    ).map((row) => row.id);
+  };
+
+  it("keys a group with keyless rows whole, since keyless rows sort first", () => {
+    const rows = [
+      { id: "a", activeOrderKey: null },
+      { id: "b", activeOrderKey: "m" },
+      { id: "c", activeOrderKey: "t" },
+    ];
+    expect(sortAfter(rows, ["b", "c", "a"], "a")).toEqual(["b", "c", "a"]);
+  });
+
+  it("moves one keyed row between its new neighbours", () => {
+    const rows = [
+      { id: "a", activeOrderKey: "g" },
+      { id: "b", activeOrderKey: "m" },
+      { id: "c", activeOrderKey: "t" },
+    ];
+    expect(sortAfter(rows, ["c", "a", "b"], "c")).toEqual(["c", "a", "b"]);
+  });
+});
+
+describe("nestSidebarThreads", () => {
+  const environmentId = EnvironmentId.make("env-nest");
+  const row = (id: string, projectId: string, parent: string | null = null) =>
+    makeThreadFixture({
+      environmentId,
+      id: ThreadId.make(id),
+      projectId: ProjectId.make(projectId),
+      lineage: {
+        rootThreadId: ThreadId.make(parent ?? id),
+        parentThreadId: parent === null ? null : ThreadId.make(parent),
+        relationshipToParent: parent === null ? null : "spawned",
+      },
+    });
+  const nestedIds = (acrossProjects: boolean) =>
+    nestSidebarThreads(
+      [row("parent", "app"), row("other", "app"), row("child", "mcp", "parent")],
+      emptySidebarNesting(),
+      new Set(),
+      [],
+      { acrossProjects },
+    ).map((thread) => thread.id);
+
+  it("nests a thread spawned in another project under its parent", () => {
+    expect(nestedIds(true)).toEqual(["parent", "child", "other"]);
+  });
+
+  it("keeps project folders apart, where a child nests only within its own project", () => {
+    expect(nestedIds(false)).toEqual(["parent", "other", "child"]);
   });
 });

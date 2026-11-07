@@ -562,6 +562,13 @@ export interface ClaudeAgentSdkQuerySession {
   readonly backgroundTasks: (
     toolUseId: string,
   ) => Effect.Effect<boolean, ClaudeAgentSdkQueryRunnerError>;
+  /** The end of a shell or Monitor task's output (the SDK's get_task_output). */
+  readonly getTaskOutput?: (
+    taskId: string,
+  ) => Effect.Effect<
+    { readonly output: string; readonly total_bytes: number; readonly truncated: boolean },
+    ClaudeAgentSdkQueryRunnerError
+  >;
   readonly mcpServerStatus: Effect.Effect<
     ReadonlyArray<ClaudeMcpServerStatus>,
     ClaudeAgentSdkQueryRunnerError
@@ -1477,6 +1484,21 @@ export const layerQueryRunner: Layer.Layer<
                   }),
                 ),
               ),
+            getTaskOutput: (taskId) =>
+              Effect.tryPromise({
+                // Shipped in the SDK runtime but missing from its typings.
+                try: () =>
+                  (
+                    queryRuntime as unknown as {
+                      getTaskOutput: (taskId: string) => Promise<{
+                        output: string;
+                        total_bytes: number;
+                        truncated: boolean;
+                      }>;
+                    }
+                  ).getTaskOutput(taskId),
+                catch: (cause) => queryRunnerError(cause, "getTaskOutput"),
+              }),
             backgroundTasks: (toolUseId) =>
               Effect.tryPromise({
                 try: () => queryRuntime.backgroundTasks(toolUseId),
@@ -11512,10 +11534,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ),
         );
 
-        // Move subagents to the background before priority "now" steers cancel foreground tools.
+        // Move subagents and running commands to the background before priority "now" steers
+        // cancel foreground tools, so Send now never kills a command.
         const backgroundForegroundSubagents = Effect.fnUntraced(function* (
           live: ClaudeLiveQueryContext,
           deadline: number,
+          context: ActiveClaudeTurnContext,
         ) {
           const foreground: Array<{
             readonly taskId: string;
@@ -11571,6 +11595,28 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             backgroundMovesByToolUseId.set(toolUseId, move);
             moves.push(move);
           }
+          // Settled calls leave the registry, so these are still running.
+          for (const toolCall of context.toolCalls.values()) {
+            if (
+              toolCall.toolName !== "Bash" ||
+              toolCall.classification.itemType !== "command_execution" ||
+              backgroundMovesByToolUseId.has(toolCall.nativeItemId)
+            ) {
+              continue;
+            }
+            const move = yield* live.query.backgroundTasks(toolCall.nativeItemId).pipe(
+              Effect.asVoid,
+              Effect.catch((cause) =>
+                Effect.logWarning("orchestration-v2.claude-steer-background-command-failed", {
+                  toolUseId: toolCall.nativeItemId,
+                  cause,
+                }),
+              ),
+              Effect.forkIn(sessionScope),
+            );
+            backgroundMovesByToolUseId.set(toolCall.nativeItemId, move);
+            moves.push(move);
+          }
           const remaining = deadline - (yield* Clock.currentTimeMillis);
           yield* Fiber.joinAll(moves).pipe(Effect.timeoutOption(Math.max(0, remaining)));
         });
@@ -11619,7 +11665,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
               Effect.provideService(Path.Path, path),
             );
-            yield* backgroundForegroundSubagents(existing, backgroundDeadline);
+            yield* backgroundForegroundSubagents(existing, backgroundDeadline, currentTurn);
             // The turn can end while the moves are answered. A steer offered
             // then would start a new turn the orchestrator never asked for, so
             // the steer fails and the orchestrator starts the follow-up turn.
@@ -11973,6 +12019,31 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 );
             }),
           },
+          readTaskOutput: Effect.fn("ClaudeAdapterV2.readTaskOutput")(function* ({ taskId }) {
+            const liveQuery = yield* Ref.get(queryContext);
+            const read = liveQuery?.query.getTaskOutput;
+            if (liveQuery === null || read === undefined) {
+              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: CLAUDE_PROVIDER,
+                detail: "No live Claude session to read task output from",
+              });
+            }
+            const result = yield* read(taskId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CLAUDE_PROVIDER,
+                    detail: "Task output request failed",
+                    cause,
+                  }),
+              ),
+            );
+            return {
+              output: result.output,
+              totalBytes: result.total_bytes,
+              truncated: result.truncated,
+            };
+          }),
           // Claude's Ctrl+B for one call: it answers the tool call at once and the command keeps running.
           backgroundToolCall: Effect.fn("ClaudeAdapterV2.backgroundToolCall")(function* ({
             providerThread,

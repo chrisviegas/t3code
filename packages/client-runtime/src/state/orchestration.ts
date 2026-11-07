@@ -141,6 +141,11 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:background-command",
       tag: ORCHESTRATION_V2_WS_METHODS.backgroundCommand,
     }),
+    // Polled while a background command's output is on screen.
+    readBackgroundTaskOutput: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:read-background-task-output",
+      tag: ORCHESTRATION_V2_WS_METHODS.readBackgroundTaskOutput,
+    }),
     forceStopThread: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:orchestration:force-stop-thread",
       tag: ORCHESTRATION_V2_WS_METHODS.forceStopThread,

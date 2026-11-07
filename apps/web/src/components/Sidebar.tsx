@@ -200,6 +200,9 @@ import {
   resolveAdjacentThreadId,
   resolveSidebarSweepKeys,
   resolveSidebarDropTarget,
+  resolveSidebarGroupTarget,
+  sidebarGroupHeaderId,
+  planSidebarGroupReorder,
   resolveSidebarDropVerb,
   resolveSidebarThreadSection,
   resolveSidebarReorderableThreadKeys,
@@ -215,6 +218,7 @@ import {
   useSnoozeWakeClock,
   useThreadJumpHintsVisible,
   type SidebarListItem,
+  type SidebarListMarker,
   type SidebarSection,
   resolveSidebarRowThreadId,
 } from "./Sidebar.logic";
@@ -270,7 +274,9 @@ import { SidebarDraftBlock } from "./sidebar/SidebarDraftBlock";
 import { readThreadGroups, useThreadGroupActions } from "../hooks/useThreadGroups";
 import { requestThreadGroupName } from "./ThreadGroupNameDialog";
 import {
+  SidebarGroupDropOutline,
   SidebarThreadGroupHeader,
+  SidebarUngroupedHeader,
   sidebarThreadGroupRowId,
 } from "./sidebar/SidebarThreadGroupHeader";
 import {
@@ -455,9 +461,15 @@ function useSidebarThreads(input: {
     folderGroups,
     keepEmptyFolders: keepEmpty,
   } = input;
-  // Folders already separate the work, so boring mode has no Working shelf.
+  // Folders already separate the work, so boring mode has no Working shelf; thread groups take
+  // its place too, with the threads in none under Ungrouped.
+  const usesThreadGroups = [...serverConfigs.values()].some(
+    (config) => (config.settings.threadGroups ?? []).length > 0,
+  );
   const workingShelfEnabled =
-    useClientSettings((s) => s.sidebarWorkingShelfEnabled) && folderGroups === null;
+    useClientSettings((s) => s.sidebarWorkingShelfEnabled) &&
+    folderGroups === null &&
+    !usesThreadGroups;
   const environmentConnections = useEnvironmentConnectionSummaries();
   const liveShellEnvironmentIds = useAtomValue(liveShellEnvironmentIdsAtom);
   const disconnectedEnvironmentIds = new Set(
@@ -775,7 +787,9 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const nesting = emptySidebarNesting();
   const hiddenNestedThreads: EnvironmentThreadShell[] = [];
   const nest = (list: readonly EnvironmentThreadShell[]) =>
-    nestSidebarThreads(list, nesting, input.collapsedNestedKeys, hiddenNestedThreads);
+    nestSidebarThreads(list, nesting, input.collapsedNestedKeys, hiddenNestedThreads, {
+      acrossProjects: !sortActiveBySend,
+    });
   const sortedPinned = nest(sortPinnedThreadsForSidebar(pinned));
   const sortedActive = nest(
     sortActiveBySend
@@ -1161,6 +1175,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     readonly occurredAt: string;
     readonly activationY: number | null;
     readonly targetSection: SidebarSection | null;
+    /** The thread group the row would join, when hovering one. */
+    readonly targetGroup?: string | null;
+    /** Hovering a group, so the Active zone is not the destination. */
+    readonly overGroup?: boolean;
     readonly contextDrag: boolean;
   } | null>(null);
   const dragSensorRef = useRef<SidebarPointerSensor | null>(null);
@@ -1459,114 +1477,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
   });
-  const handleThreadGroupContextMenu = useStableCallback(
-    (groupKey: string, position: { x: number; y: number }) => {
-      const api = readLocalApi();
-      const definition = threadGroups.find((group) => group.key === groupKey);
-      if (!api || definition === undefined) return;
-      const { environmentId, group } = definition;
-      // Pinned, snoozed and settled members sit on their shelves but still belong to the group.
-      const members = threads.filter(
-        (thread) =>
-          thread.environmentId === environmentId &&
-          thread.groupId === group.id &&
-          thread.archivedAt === null,
-      );
-      const count = members.length;
-      const reportBulkFailure = (
-        title: string,
-        result: Parameters<typeof isAtomCommandInterrupted>[0],
-      ) => {
-        if (isAtomCommandInterrupted(result)) return;
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title,
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      };
-      void (async () => {
-        const clicked = await settlePromise(() =>
-          api.contextMenu.show(
-            [
-              { id: "rename", label: "Rename group", icon: "pencil" },
-              {
-                id: "archive-threads",
-                label: `Archive all threads (${count})`,
-                icon: "archive",
-                disabled: count === 0 || !canOperateThreads(members),
-              },
-              {
-                id: "delete-threads",
-                label: `Delete all threads (${count})`,
-                icon: "trash",
-                destructive: true,
-                separatorBefore: true,
-                disabled: count === 0 || !canOperateThreads(members),
-              },
-              { id: "delete", label: "Delete group", icon: "trash", destructive: true },
-            ],
-            position,
-          ),
-        );
-        if (clicked._tag === "Failure") return;
-        switch (clicked.value) {
-          case "archive-threads": {
-            const confirmed = await settlePromise(() =>
-              api.dialogs.confirm(
-                `Archive ${count} thread${count === 1 ? "" : "s"} in "${group.name}"?`,
-              ),
-            );
-            if (confirmed._tag === "Failure" || !confirmed.value) return;
-            for (const thread of members) {
-              const result = await archiveThread(scopeThreadRef(thread.environmentId, thread.id));
-              if (result._tag === "Failure") {
-                reportBulkFailure("Failed to archive threads", result);
-                return;
-              }
-            }
-            return;
-          }
-          case "delete-threads": {
-            const confirmed = await settlePromise(() =>
-              api.dialogs.confirm(
-                [
-                  `Delete ${count} thread${count === 1 ? "" : "s"} in "${group.name}"?`,
-                  "This permanently clears conversation history for these threads.",
-                ].join("\n"),
-                { variant: "destructive" },
-              ),
-            );
-            if (confirmed._tag === "Failure" || !confirmed.value) return;
-            if (!checkThreadOperations(members)) return;
-            const { firstFailure } = await deleteSelectedThreadEntries({
-              entries: members.map((thread) => ({ thread, threadKey: threadShellKey(thread) })),
-              delete: ({ thread }, deletedThreadKeys) =>
-                deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
-                  deletedThreadKeys,
-                }),
-            });
-            if (firstFailure !== null) reportBulkFailure("Failed to delete threads", firstFailure);
-            return;
-          }
-          case "rename": {
-            const name = await requestThreadGroupName({
-              title: "Rename group",
-              submitLabel: "Rename",
-              initialName: group.name,
-            });
-            if (name !== null) await threadGroupActions.renameGroup(environmentId, group.id, name);
-            return;
-          }
-          case "delete":
-            await threadGroupActions.deleteGroup(environmentId, group.id);
-            return;
-        }
-      })();
-    },
-  );
 
   // Ranked across environments as the palette ranks them, so one
   // environment's list does not sit above another's better matches; rows
@@ -1859,6 +1769,206 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       }
     })();
   };
+  // The group's rows that are not settled yet; pinned and shelved members stay where they are.
+  const unsettledGroupThreads = (groupKey: string) =>
+    threadGroups.find((group) => group.key === groupKey)?.threads.length === undefined
+      ? []
+      : threads.filter(
+          (thread) =>
+            `${thread.environmentId}:${thread.groupId ?? ""}` === groupKey &&
+            thread.archivedAt === null &&
+            sectionByThreadKey.get(threadShellKey(thread)) === "active",
+        );
+  const settleThreadGroup = (groupKey: string) => {
+    const members = unsettledGroupThreads(groupKey);
+    if (!checkThreadOperations(members)) return;
+    const keys = new Set(members.map(threadShellKey));
+    for (const thread of members) {
+      attemptSettle(scopeThreadRef(thread.environmentId, thread.id), { coSettlingKeys: keys });
+    }
+  };
+  const handleThreadGroupDrop = (groupKey: string, overId: string | null) => {
+    const definition = threadGroups.find((group) => group.key === groupKey);
+    const over = sidebarListItems.find((item) => sidebarListItemId(item) === overId);
+    if (definition === undefined || over === undefined) return;
+    if (
+      (over.kind === "marker" &&
+        (over.marker === "settled-header" || over.marker === "settled-placeholder")) ||
+      (over.kind === "thread" && over.section === "settled")
+    ) {
+      settleThreadGroup(groupKey);
+      return;
+    }
+    if (over.kind !== "group" || over.groupKey === groupKey) return;
+    const order = threadGroups
+      .filter((group) => group.environmentId === definition.environmentId)
+      .map((group) => group.key);
+    const to = order.indexOf(over.groupKey);
+    if (to === -1) return;
+    order.splice(to, 0, ...order.splice(order.indexOf(groupKey), 1));
+    void threadGroupActions.reorderGroups(
+      definition.environmentId,
+      order.flatMap((key) => threadGroups.find((group) => group.key === key)?.group.id ?? []),
+    );
+  };
+  const handleThreadGroupContextMenu = useStableCallback(
+    (groupKey: string, position: { x: number; y: number }) => {
+      const api = readLocalApi();
+      const definition = threadGroups.find((group) => group.key === groupKey);
+      if (!api || definition === undefined) return;
+      const { environmentId, group } = definition;
+      // Pinned, snoozed and settled members sit on their shelves but still belong to the group.
+      const members = threads.filter(
+        (thread) =>
+          thread.environmentId === environmentId &&
+          thread.groupId === group.id &&
+          thread.archivedAt === null,
+      );
+      const count = members.length;
+      const environmentGroupKeys = threadGroups
+        .filter((entry) => entry.environmentId === environmentId)
+        .map((entry) => entry.key);
+      const reportBulkFailure = (
+        title: string,
+        result: Parameters<typeof isAtomCommandInterrupted>[0],
+      ) => {
+        if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title,
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      };
+      void (async () => {
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(
+            [
+              { id: "rename", label: "Rename group", icon: "pencil" },
+              ...(environmentGroupKeys.length > 1
+                ? [
+                    {
+                      id: "move-up",
+                      label: "Move group up",
+                      disabled: environmentGroupKeys[0] === groupKey,
+                    },
+                    {
+                      id: "move-down",
+                      label: "Move group down",
+                      disabled: environmentGroupKeys.at(-1) === groupKey,
+                    },
+                  ]
+                : []),
+              {
+                id: "settle-threads",
+                label: `Settle all threads (${unsettledGroupThreads(groupKey).length})`,
+                icon: "circle-check",
+                disabled:
+                  unsettledGroupThreads(groupKey).length === 0 ||
+                  !canOperateThreads(unsettledGroupThreads(groupKey)),
+              },
+              {
+                id: "archive-threads",
+                label: `Archive all threads (${count})`,
+                icon: "archive",
+                disabled: count === 0 || !canOperateThreads(members),
+              },
+              // Removing the group only ungroups its threads, so it is not destructive.
+              { id: "delete", label: "Remove group (keeps threads)", icon: "unlink" },
+              {
+                id: "delete-threads",
+                label: `Delete all threads (${count})`,
+                icon: "trash",
+                destructive: true,
+                separatorBefore: true,
+                disabled: count === 0 || !canOperateThreads(members),
+              },
+            ],
+            position,
+          ),
+        );
+        if (clicked._tag === "Failure") return;
+        switch (clicked.value) {
+          case "settle-threads":
+            settleThreadGroup(groupKey);
+            return;
+          case "archive-threads": {
+            const confirmed = await settlePromise(() =>
+              api.dialogs.confirm(
+                `Archive ${count} thread${count === 1 ? "" : "s"} in "${group.name}"?`,
+              ),
+            );
+            if (confirmed._tag === "Failure" || !confirmed.value) return;
+            for (const thread of members) {
+              const result = await archiveThread(scopeThreadRef(thread.environmentId, thread.id));
+              if (result._tag === "Failure") {
+                reportBulkFailure("Failed to archive threads", result);
+                return;
+              }
+            }
+            return;
+          }
+          case "delete-threads": {
+            const confirmed = await settlePromise(() =>
+              api.dialogs.confirm(
+                [
+                  `Delete ${count} thread${count === 1 ? "" : "s"} in "${group.name}"?`,
+                  "This permanently clears conversation history for these threads.",
+                ].join("\n"),
+                { variant: "destructive" },
+              ),
+            );
+            if (confirmed._tag === "Failure" || !confirmed.value) return;
+            if (!checkThreadOperations(members)) return;
+            const { firstFailure } = await deleteSelectedThreadEntries({
+              entries: members.map((thread) => ({ thread, threadKey: threadShellKey(thread) })),
+              delete: ({ thread }, deletedThreadKeys) =>
+                deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
+                  deletedThreadKeys,
+                }),
+            });
+            if (firstFailure !== null) reportBulkFailure("Failed to delete threads", firstFailure);
+            return;
+          }
+          case "rename": {
+            const name = await requestThreadGroupName({
+              title: "Rename group",
+              submitLabel: "Rename",
+              initialName: group.name,
+            });
+            if (name !== null) await threadGroupActions.renameGroup(environmentId, group.id, name);
+            return;
+          }
+          case "delete":
+            await threadGroupActions.deleteGroup(environmentId, group.id);
+            return;
+          case "move-up":
+          case "move-down": {
+            const groupIndex = environmentGroupKeys.indexOf(groupKey);
+            const neighbour =
+              environmentGroupKeys[groupIndex + (clicked.value === "move-up" ? -1 : 1)];
+            if (neighbour === undefined) return;
+            const order = [...environmentGroupKeys];
+            order.splice(groupIndex, 1);
+            order.splice(
+              order.indexOf(neighbour) + (clicked.value === "move-up" ? 0 : 1),
+              0,
+              groupKey,
+            );
+            await threadGroupActions.reorderGroups(
+              environmentId,
+              order.flatMap(
+                (key) => threadGroups.find((entry) => entry.key === key)?.group.id ?? [],
+              ),
+            );
+            return;
+          }
+        }
+      })();
+    },
+  );
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers this sidebar's settle handler in the module-level settleAndAdvance registry
   useEffect(() => registerSettleAndAdvance(attemptSettle), [attemptSettle]);
   const settleThreads = (threadKeys: readonly string[]) => {
@@ -1931,8 +2041,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     };
   };
 
-  const isContextDrag = dragState?.contextDrag === true || dragState?.activeSection === "working";
+  const isContextDrag = dragState?.contextDrag === true;
   const dragTargetSection = isContextDrag ? null : (dragState?.targetSection ?? null);
+  const dragTargetGroup = isContextDrag ? null : (dragState?.targetGroup ?? null);
+  const dragOverActiveZone = dragTargetSection === "active" && dragState?.overGroup !== true;
   const finishThreadDrag = (started: boolean) => {
     dragSensorRef.current = null;
     contextDragKeyRef.current = null;
@@ -2100,6 +2212,107 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     })();
   };
 
+  const canJoinThreadGroup = (thread: EnvironmentThreadShell, groupKey: string) =>
+    // A pinned or shelved thread can come back to the group it still names.
+    !(
+      isGroupedThread(thread) &&
+      !isNestedRow(thread) &&
+      groupKey === `${thread.environmentId}:${thread.groupId}`
+    ) &&
+    threadGroups.some(
+      (group) => group.key === groupKey && group.environmentId === thread.environmentId,
+    );
+  // The rows a nested row is drawn under, nearest first; a dragged parent carries them along.
+  const nestingAncestorKeys = (thread: EnvironmentThreadShell) => {
+    const keys: string[] = [];
+    let current = thread;
+    while (nesting.guidesByKey.has(threadShellKey(current))) {
+      const parentId = current.lineage.parentThreadId;
+      const parent =
+        parentId === null
+          ? undefined
+          : threadByKey.get(scopedThreadKey(scopeThreadRef(current.environmentId, parentId)));
+      if (parent === undefined || keys.includes(threadShellKey(parent))) break;
+      keys.push(threadShellKey(parent));
+      current = parent;
+    }
+    return keys;
+  };
+  const nestedDescendants = (thread: EnvironmentThreadShell) => {
+    const key = threadShellKey(thread);
+    return [...threadByKey.values()].filter(
+      (candidate) => candidate !== thread && nestingAncestorKeys(candidate).includes(key),
+    );
+  };
+  // Dragging a nested row on its own takes it out from under its parent.
+  const isNestedRow = (thread: EnvironmentThreadShell) =>
+    nesting.guidesByKey.has(threadShellKey(thread)) && threadCanDetachFromParent(thread.lineage);
+  const detachDraggedRow = async (thread: EnvironmentThreadShell) => {
+    if (!isNestedRow(thread)) return true;
+    const result = await detachThreadFromParent(scopeThreadRef(thread.environmentId, thread.id));
+    if (result._tag === "Success") return true;
+    if (!isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not detach thread",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    }
+    return false;
+  };
+  const isOwnGroup = (thread: EnvironmentThreadShell, groupKey: string) =>
+    isGroupedThread(thread) && groupKey === `${thread.environmentId}:${thread.groupId}`;
+  // Rows drawn inside a group, not pinned or shelved threads that also carry a groupId.
+  const isGroupedThread = (thread: EnvironmentThreadShell) => {
+    const key = threadShellKey(thread);
+    return sidebarListItems.some((item) => item.kind === "group" && item.key === key);
+  };
+  // Same rule as the drag projection: the slot opens above the hovered row, below it when moving
+  // down, and at the top over the header.
+  // The group's row order once `movedKey` lands where the drag projection opened its slot:
+  // above the hovered row (below it when moving down within the group), at the top over the header.
+  const groupOrderAfterDrop = (groupKey: string, movedKey: string, overId: string) => {
+    const rows = sidebarListItems.flatMap((item) =>
+      item.kind === "group" && item.groupKey === groupKey && item.key !== undefined
+        ? [item.key]
+        : [],
+    );
+    const from = rows.indexOf(movedKey);
+    const overIndex = rows.indexOf(overId);
+    const order = rows.filter((key) => key !== movedKey);
+    const to =
+      overIndex === -1 ? 0 : order.indexOf(overId) + (from !== -1 && overIndex > from ? 1 : 0);
+    order.splice(to, 0, movedKey);
+    return { rows, order };
+  };
+  const writeGroupOrder = async (order: readonly string[], movedKey: string) => {
+    const keysById = new Map(
+      order.map((key) => [key, threadByKey.get(key)?.activeOrderKey] as const),
+    );
+    for (const { id, orderKey } of planSidebarGroupReorder(order, keysById, movedKey)) {
+      const target = threadByKey.get(id);
+      if (target === undefined) continue;
+      const result = await reorderActiveThread(
+        scopeThreadRef(target.environmentId, target.id),
+        orderKey,
+      );
+      if (result._tag === "Failure") return;
+    }
+  };
+  const reorderWithinGroup = (thread: EnvironmentThreadShell, groupKey: string, overId: string) => {
+    if (!checkThreadOperations([thread])) return;
+    const movedKey = threadShellKey(thread);
+    const { rows, order } = groupOrderAfterDrop(groupKey, movedKey, overId);
+    if (order.every((key, index) => key === rows[index]) && !isNestedRow(thread)) return;
+    void (async () => {
+      // A nested row moved on its own also leaves its parent.
+      if (!(await detachDraggedRow(thread))) return;
+      await writeGroupOrder(order, movedKey);
+    })();
+  };
   const handleThreadDragStart = (event: DragStartEvent) => {
     const activeKey = String(event.active.id);
     contextDragKeyRef.current = activeKey;
@@ -2143,7 +2356,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         activeThreads.length +
         workingThreads.length +
         snoozedThreads.length +
-        settledCount ===
+        settledCount +
+        threadGroups.length ===
         0
     ) {
       return [];
@@ -2152,12 +2366,33 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     const pinnedRows = rowsOf(pinnedThreads, "pinned");
     items.push(...pinnedRows);
     items.push({ kind: "marker", marker: "pinned-divider" });
+    const pushGroups = () => {
+      // A closed Working shelf keeps only the open thread, under its group's header.
+      const shelfClosed = workingShelfEnabled && !workingShelfExpanded;
+      for (const threadGroup of threadGroups) {
+        const rows = shelfClosed
+          ? routeThreadOnly(threadGroup.threads, routeRowThreadKey)
+          : threadGroup.threads;
+        if (shelfClosed && rows.length === 0) continue;
+        items.push({ kind: "group", groupKey: threadGroup.key });
+        for (const thread of rows) {
+          items.push({ kind: "group", groupKey: threadGroup.key, key: threadShellKey(thread) });
+        }
+      }
+    };
+    // Groups are work in progress, so they open the Working shelf when it is on.
+    if (!workingShelfEnabled) pushGroups();
     const activeRows = rowsOf(activeThreads, "active");
+    if (!workingShelfEnabled && threadGroups.length > 0 && activeRows.length > 0) {
+      items.push({ kind: "marker", marker: "ungrouped-header" });
+    }
     items.push({ kind: "marker", marker: "active-placeholder" });
     items.push(...activeRows);
-    if (workingThreads.length > 0) {
+    if (workingThreads.length > 0 || (workingShelfEnabled && threadGroups.length > 0)) {
       items.push({ kind: "marker", marker: "working-header" });
+      // Ungrouped work leads the shelf, so no group header sits above it.
       items.push(...rowsOf(visibleWorkingThreads, "working"));
+      if (workingShelfEnabled) pushGroups();
     }
     if (snoozedThreads.length > 0) {
       items.push({ kind: "marker", marker: "snoozed-header" });
@@ -2171,7 +2406,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   })();
   // Preserve the list while streamed updates leave order unchanged to retain row memoization.
   const sidebarListItemsKey = sidebarListItemsFresh
-    .map((item) => (item.kind === "thread" ? item.section + ":" + item.key : item.marker))
+    .map((item) =>
+      item.kind === "thread"
+        ? item.section + ":" + item.key
+        : item.kind === "group"
+          ? `group:${item.groupKey}:${item.key ?? ""}`
+          : item.marker,
+    )
     .join("\n");
   const [sidebarListItemsState, setSidebarListItems] = useState(sidebarListItemsFresh);
   const [sidebarListItemsKeyState, setSidebarListItemsKeyState] = useState(sidebarListItemsKey);
@@ -2186,7 +2427,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   useEffect(() => {
     if (
       dragState !== null &&
-      !sidebarListItems.some((item) => item.kind === "thread" && item.key === dragState.activeKey)
+      !sidebarListItems.some(
+        (item) => item.kind !== "marker" && sidebarListItemId(item) === dragState.activeKey,
+      )
     ) {
       cancelThreadDrag();
     }
@@ -2216,13 +2459,32 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     listMotionRef.current?.update(listMotionPass.animate && shelvesUnchanged);
   }, [listMotionPass, shelfExpansionKey]);
   const handleThreadDragOver = (event: DragOverEvent) => {
-    const target = event.over
-      ? resolveSidebarDropTarget(sidebarListItems, String(event.active.id), String(event.over.id))
-      : null;
+    // Over itself means no valid target yet: the row holds its place and goes nowhere.
+    const target =
+      event.over && event.over.id !== event.active.id
+        ? resolveSidebarDropTarget(sidebarListItems, String(event.active.id), String(event.over.id))
+        : null;
+    const overGroup =
+      event.over && event.over.id !== event.active.id
+        ? resolveSidebarGroupTarget(sidebarListItems, String(event.over.id))
+        : null;
+    const activeThread = threadByKey.get(String(event.active.id));
+    // Only a group the row can join lights up.
+    const targetGroup =
+      overGroup !== null &&
+      activeThread !== undefined &&
+      canJoinThreadGroup(activeThread, overGroup)
+        ? overGroup
+        : null;
     setDragState((current) =>
       current === null || current.activeKey !== String(event.active.id)
         ? current
-        : { ...current, targetSection: target?.section ?? null },
+        : {
+            ...current,
+            targetSection: target?.section ?? null,
+            targetGroup,
+            overGroup: overGroup !== null,
+          },
     );
   };
   const sortableIds = sidebarListItems.map(sidebarListItemId);
@@ -2237,8 +2499,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           activeThreads,
           workingShelfEnabled,
         });
+  // With groups, the threads in none sit under an Ungrouped title, so the Active label goes; with
+  // the groups in the Working shelf, that shelf is where work lives and no Active zone shows.
+  const activeZoneHidden = workingShelfEnabled && threadGroups.length > 0;
+  const activeDividerHidden = threadGroups.length > 0;
+  const hiddenDragMarkers = new Set<SidebarListMarker>([
+    ...(activeDividerHidden ? (["pinned-divider"] as const) : []),
+    ...(activeZoneHidden ? (["active-placeholder"] as const) : []),
+  ]);
   const sidebarSortingStrategy = createSidebarSortingStrategy({
     items: sidebarListItems,
+    hiddenMarkers: hiddenDragMarkers,
     enabled: !isContextDrag,
     boundaryLabelHeight: SIDEBAR_DRAG_LABEL_HEIGHT,
     settledOrder: draggedSettledOrder,
@@ -2260,6 +2531,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       (id) => {
         const target = resolveSidebarDropTarget(sidebarListItems, draggedThreadKey, id);
         if (target === null) return false;
+        const targetGroup = resolveSidebarGroupTarget(sidebarListItems, id);
+        if (targetGroup !== null)
+          return canJoinThreadGroup(source, targetGroup) || isOwnGroup(source, targetGroup);
+        // Working rows keep their time order; they can still be pinned, settled, or grouped.
+        if (draggedFromSection === "working") return target.section !== "active";
+        // A grouped row leaves its group for any section; a nested row leaves its parent.
+        if (isGroupedThread(source) || (isNestedRow(source) && target.section === "active"))
+          return true;
         return (
           planSidebarThreadDrop({
             activeKey: draggedThreadKey,
@@ -2286,6 +2565,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   })();
   const handleThreadDragEnd = (event: DragEndEvent) => {
     const activeKey = String(event.active.id);
+    const draggedGroup = sidebarListItems.find(
+      (item) =>
+        item.kind === "group" && item.key === undefined && sidebarListItemId(item) === activeKey,
+    );
+    if (draggedGroup?.kind === "group") {
+      handleThreadGroupDrop(
+        draggedGroup.groupKey,
+        event.over === null ? null : String(event.over.id),
+      );
+      return;
+    }
     const activeSection = sectionByThreadKey.get(activeKey);
     const target =
       event.over === null
@@ -2294,6 +2584,77 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     const activeThread = threadByKey.get(activeKey);
     if (activeSection === undefined || target === null || activeThread === undefined) return;
     const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+    // Released over itself: nothing moved, so a grouped or nested row stays put.
+    if (event.over?.id === event.active.id) return;
+    if (event.over !== null) {
+      const overId = String(event.over.id);
+      const overGroup = resolveSidebarGroupTarget(sidebarListItems, overId);
+      if (overGroup !== null && isOwnGroup(activeThread, overGroup)) {
+        reorderWithinGroup(activeThread, overGroup, overId);
+        return;
+      }
+    }
+    const targetGroup =
+      event.over === null
+        ? null
+        : resolveSidebarGroupTarget(sidebarListItems, String(event.over.id));
+    if (targetGroup !== null) {
+      if (!canJoinThreadGroup(activeThread, targetGroup) || !checkThreadOperations([activeThread]))
+        return;
+      const groupId = threadGroups.find((group) => group.key === targetGroup)?.group.id;
+      if (groupId === undefined) return;
+      void (async () => {
+        // Groups hold active threads, so a pinned, snoozed or settled row comes back first.
+        if (activeThread.pinnedAt != null && (await unpinThread(threadRef))._tag === "Failure")
+          return;
+        if (activeSection === "settled" && (await unsettleThread(threadRef))._tag === "Failure")
+          return;
+        if (activeSection === "snoozed" && (await unsnoozeThread(threadRef))._tag === "Failure")
+          return;
+        if (!(await detachDraggedRow(activeThread))) return;
+        if (activeThread.groupId !== groupId)
+          await threadGroupActions.moveThread(threadRef, groupId);
+        // Nested rows travel with their parent.
+        for (const child of nestedDescendants(activeThread)) {
+          if (child.groupId === groupId) continue;
+          await threadGroupActions.moveThread(
+            scopeThreadRef(child.environmentId, child.id),
+            groupId,
+          );
+        }
+        // Land where the slot opened, not wherever the row's old order key sorts.
+        if (event.over !== null) {
+          const { order } = groupOrderAfterDrop(targetGroup, activeKey, String(event.over.id));
+          await writeGroupOrder(order, activeKey);
+        }
+      })();
+      return;
+    }
+    if (activeSection === "working") {
+      if (!checkThreadOperations([activeThread])) return;
+      if (target.section === "pinned") attemptPin(threadRef);
+      else if (target.section === "settled") attemptSettle(threadRef);
+      return;
+    }
+    if (isGroupedThread(activeThread)) {
+      if (!checkThreadOperations([activeThread])) return;
+      void (async () => {
+        if (!(await detachDraggedRow(activeThread))) return;
+        // The group is the thread's place among active threads: pinned or settled, it keeps it.
+        if (target.section === "pinned") attemptPin(threadRef);
+        else if (target.section === "settled") attemptSettle(threadRef);
+        else {
+          await threadGroupActions.moveThread(threadRef, null);
+          for (const child of nestedDescendants(activeThread)) {
+            await threadGroupActions.moveThread(
+              scopeThreadRef(child.environmentId, child.id),
+              null,
+            );
+          }
+        }
+      })();
+      return;
+    }
     const plan = planSidebarThreadDrop({
       activeKey,
       activeSection,
@@ -2309,7 +2670,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       activeReorderableKeys: activeReorderableThreadKeys,
       activeTimeOrdered: workingShelfEnabled,
     });
-    if (plan.kind === "none") return;
+    if (plan.kind === "none") {
+      if (target.section === "active" && checkThreadOperations([activeThread]))
+        void detachDraggedRow(activeThread);
+      return;
+    }
     if (plan.kind === "settle" && settlingThreadKeysRef.current.has(activeKey)) return;
     const assignments =
       plan.kind === "pin"
@@ -2344,6 +2709,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     };
     setOptimisticDrop(drop);
     void (async () => {
+      if (!(await detachDraggedRow(activeThread))) {
+        setOptimisticDrop((current) => (current === drop ? null : current));
+        return;
+      }
       const run = async (
         operation: Promise<AtomCommandResult<unknown, unknown>>,
         title: string,
@@ -3557,23 +3926,37 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         );
                         const isCard =
                           section === "active" || section === "pinned" || section === "working";
-                        const rowVariant = folderRow
-                          ? folderRowsMultiline
-                            ? "folder-multiline"
-                            : "folder"
-                          : isCard
-                            ? "card"
-                            : "slim";
+                        // Grouped rows keep the regular card layout; only project folders slim them.
+                        const rowVariant =
+                          folderRow && !inGroup
+                            ? folderRowsMultiline
+                              ? "folder-multiline"
+                              : "folder"
+                            : isCard
+                              ? "card"
+                              : "slim";
                         return (
                           <SortableThreadRow
                             key={threadKey}
                             sortableId={threadKey}
                             contextDrag={isContextDrag}
+                            followDragIds={
+                              [
+                                ...(inGroup
+                                  ? [
+                                      sidebarGroupHeaderId(
+                                        `${thread.environmentId}:${thread.groupId}`,
+                                      ),
+                                    ]
+                                  : []),
+                                ...nestingAncestorKeys(thread),
+                              ].join("\n") || undefined
+                            }
                             sortableDisabled={
                               projectFolders !== null ||
-                              folderRow !== undefined ||
+                              (folderRow !== undefined && !inGroup) ||
                               renamingThreadKey === threadKey ||
-                              !draggableThreadKeys.has(threadKey) ||
+                              (!inGroup && !draggableThreadKeys.has(threadKey)) ||
                               optimisticDrop !== null
                             }
                             thread={thread}
@@ -3604,8 +3987,23 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             isPinned={thread.pinnedAt != null}
                             dropVerb={
                               dragState?.activeKey === threadKey
-                                ? resolveSidebarDropVerb(dragState.activeSection, dragTargetSection)
+                                ? dragState.overGroup === true
+                                  ? null
+                                  : resolveSidebarDropVerb(
+                                      dragState.activeSection,
+                                      dragTargetSection,
+                                    )
                                 : null
+                            }
+                            dropGroupName={
+                              dragState?.activeKey !== threadKey
+                                ? null
+                                : dragTargetGroup !== null
+                                  ? (threadGroups.find((group) => group.key === dragTargetGroup)
+                                      ?.group.name ?? null)
+                                  : inGroup && dragOverActiveZone
+                                    ? "Ungrouped"
+                                    : null
                             }
                             dragOverPinned={
                               dragState?.activeKey === threadKey && dragTargetSection === "pinned"
@@ -3673,6 +4071,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         );
                       };
                       const from = isContextDrag ? null : (dragState?.activeSection ?? null);
+                      const groupsInWorking = workingShelfEnabled && threadGroups.length > 0;
+                      // The first shelf after the work floats to the bottom of the list.
+                      const bottomShelfAbove =
+                        !groupsInWorking &&
+                        sidebarListItems.some(
+                          (item) => item.kind === "marker" && item.marker === "working-header",
+                        );
+                      const workingGroupThreadCount = workingShelfEnabled
+                        ? threadGroups.reduce((sum, group) => sum + group.threadCount, 0)
+                        : 0;
                       const items: ReactNode[] = [
                         <SidebarDraftBlock
                           key="draft-sessions"
@@ -3684,37 +4092,52 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           onDraftContextMenu={handleDraftContextMenu}
                         />,
                       ];
+                      const threadGroupByKey = new Map(
+                        threadGroups.map((threadGroup) => [threadGroup.key, threadGroup]),
+                      );
                       for (const item of sidebarListItems) {
-                        if (item.kind === "thread") {
-                          // Folders draw active rows in their own place below.
-                          if (projectFolders !== null && item.section === "active") continue;
-                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
-                          continue;
-                        }
-                        if (item.marker === "active-placeholder") {
-                          for (const threadGroup of threadGroups) {
+                        if (item.kind === "group") {
+                          const threadGroup = threadGroupByKey.get(item.groupKey);
+                          if (threadGroup === undefined) continue;
+                          if (item.key === undefined) {
                             items.push(
                               <SidebarThreadGroupHeader
                                 key={`thread-group:${threadGroup.key}`}
                                 groupKey={threadGroup.key}
                                 group={threadGroup.group}
                                 collapsed={threadGroup.collapsed}
-                                threadCount={threadGroup.threadCount}
+                                // A closed group still draws the open thread; count only the hidden ones.
+                                threadCount={threadGroup.threadCount - threadGroup.threads.length}
+                                isDropTarget={dragTargetGroup === threadGroup.key}
+                                leading={
+                                  threadGroup.key === threadGroups[0]?.key &&
+                                  (groupsInWorking
+                                    ? visibleWorkingThreads.length === 0
+                                    : pinnedThreads.length === 0)
+                                }
                                 onToggle={toggleThreadGroup}
                                 onContextMenu={handleThreadGroupContextMenu}
                               />,
                             );
-                            for (const thread of threadGroup.threads) {
-                              items.push(
-                                renderThreadRow(
-                                  thread,
-                                  "active",
-                                  sidebarThreadGroupRowId(threadGroup.key),
-                                  true,
-                                ),
-                              );
-                            }
+                            continue;
                           }
+                          const thread = threadByKey.get(item.key);
+                          if (thread === undefined) continue;
+                          items.push(
+                            renderThreadRow(
+                              thread,
+                              "active",
+                              sidebarThreadGroupRowId(threadGroup.key),
+                              true,
+                            ),
+                          );
+                          continue;
+                        }
+                        if (item.kind === "thread") {
+                          // Folders draw active rows in their own place below.
+                          if (projectFolders !== null && item.section === "active") continue;
+                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          continue;
                         }
                         if (projectFolders !== null && item.marker === "active-placeholder") {
                           for (const folder of projectFolders) {
@@ -3760,7 +4183,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 marker="pinned-divider"
                                 label="Active"
                                 visible={from !== null}
-                                isDropTarget={dragTargetSection === "active"}
+                                labelHidden={activeDividerHidden}
+                                isDropTarget={dragOverActiveZone}
                               />,
                             );
                             break;
@@ -3769,16 +4193,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               <SidebarSectionPlaceholder
                                 key="active-placeholder"
                                 marker="active-placeholder"
-                                label="Active"
+                                label={threadGroups.length > 0 ? "Ungrouped" : "Active"}
                                 showHint={
                                   from !== null &&
+                                  !activeZoneHidden &&
                                   (activeThreads.length === 0 ||
                                     (from === "active" &&
                                       activeThreads.length === 1 &&
                                       dragTargetSection !== null &&
                                       dragTargetSection !== "active"))
                                 }
-                                isDropTarget={dragTargetSection === "active"}
+                                isDropTarget={dragOverActiveZone}
+                              />,
+                            );
+                            break;
+                          case "ungrouped-header":
+                            items.push(
+                              <SidebarUngroupedHeader
+                                key="ungrouped-header"
+                                isDropTarget={dragOverActiveZone}
                               />,
                             );
                             break;
@@ -3787,9 +4220,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               <SidebarSectionHeader
                                 key="working-shelf-header"
                                 marker="working-header"
-                                className="mt-auto"
+                                // Holding the groups, the shelf reads top-down instead of sinking to the bottom.
+                                className={cn(!groupsInWorking && "mt-auto")}
                                 label="Working"
-                                count={workingThreads.length}
+                                count={workingThreads.length + workingGroupThreadCount}
                                 toggle={{
                                   expanded: workingShelfExpanded,
                                   onToggle: toggleWorkingShelf,
@@ -3802,7 +4236,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               <SidebarSectionHeader
                                 key="snoozed-shelf-header"
                                 marker="snoozed-header"
-                                className={cn(workingThreads.length === 0 && "mt-auto")}
+                                className={cn(!bottomShelfAbove && "mt-auto")}
                                 label="Snoozed"
                                 count={snoozedThreads.length}
                                 toggle={{
@@ -3818,7 +4252,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 key="settled-shelf-header"
                                 marker="settled-header"
                                 className={cn(
-                                  workingThreads.length + snoozedThreads.length === 0 && "mt-auto",
+                                  !bottomShelfAbove && snoozedThreads.length === 0 && "mt-auto",
                                 )}
                                 label="Settled"
                                 count={settledCount}
@@ -3839,7 +4273,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 label="Settled"
                                 showHint={
                                   from !== null &&
-                                  (renderedSettledThreads.length === 0 ||
+                                  (settledCount === 0 ||
                                     (from === "settled" &&
                                       renderedSettledThreads.length === 1 &&
                                       dragTargetSection !== null &&
@@ -3877,6 +4311,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       </li>
                     ) : null}
                   </ul>
+                  {dragTargetGroup !== null ? (
+                    <SidebarGroupDropOutline
+                      key={dragTargetGroup}
+                      groupKey={dragTargetGroup}
+                      rowKeys={sidebarListItems.flatMap((item) =>
+                        item.kind === "group" &&
+                        item.groupKey === dragTargetGroup &&
+                        item.key !== undefined &&
+                        item.key !== dragState?.activeKey
+                          ? [item.key]
+                          : [],
+                      )}
+                    />
+                  ) : null}
                 </SortableContext>
               </DndContext>
             </TooltipProvider>

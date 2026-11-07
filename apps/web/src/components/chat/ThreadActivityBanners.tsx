@@ -162,6 +162,7 @@ export function backgroundWorkNowItem(input: {
   readonly stopping: boolean;
   readonly onStop: () => Promise<void>;
   readonly onOpenThread: (threadId: ThreadId) => void;
+  readonly onShowOutput: () => void;
 }): ThreadNowItem | null {
   const { onOpenThread } = input;
   const presentation = presentPendingBackgroundWork(input.tasks);
@@ -233,13 +234,22 @@ export function backgroundWorkNowItem(input: {
             className="tabular-nums"
           />
         )}
+        {rows.some(isCommand) ? (
+          <InlineButton tone="muted" onClick={input.onShowOutput}>
+            Output
+          </InlineButton>
+        ) : null}
         {onlyThreadId === undefined ? null : (
           <InlineButton tone="muted" onClick={() => onOpenThread(onlyThreadId)}>
             Open
           </InlineButton>
         )}
-        <InlineButton disabled={input.stopDisabled} onClick={() => void input.onStop()}>
-          {input.stopping ? "Stopping..." : "Stop"}
+        <InlineButton
+          tone="destructive"
+          disabled={input.stopDisabled}
+          onClick={() => void input.onStop()}
+        >
+          {input.stopping ? "Stopping..." : rows.every(isCommand) ? "Stop commands" : "Stop"}
         </InlineButton>
       </>
     ),
