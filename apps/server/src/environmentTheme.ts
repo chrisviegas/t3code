@@ -8,6 +8,7 @@ import {
   EnvironmentThemeId,
   environmentThemeFileHasColors,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { UNPUBLISHABLE_THEME_IDS } from "@t3tools/shared/themePalettes";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -88,7 +89,46 @@ export const readThemeFileGuarded = (filePath: string, maxBytes: number): string
   }
 };
 
-export const readPublishedThemes = Effect.fn(function* (themesDir: string) {
+const readThemeFile = Effect.fn(function* (filePath: string) {
+  const raw = readThemeFileGuarded(filePath, MAX_THEME_FILE_BYTES);
+  if (raw === null) {
+    yield* Effect.logWarning("ignoring unusable environment theme file", {
+      path: filePath,
+      limit: MAX_THEME_FILE_BYTES,
+    });
+    return null;
+  }
+  if (raw.trim().length === 0) return null;
+
+  const decoded = decodeEnvironmentThemeFileJsonExit(raw);
+  if (decoded._tag === "Failure") {
+    yield* Effect.logWarning("ignoring invalid environment theme", {
+      path: filePath,
+      detail: Cause.pretty(decoded.cause),
+    });
+    return null;
+  }
+  if (!environmentThemeFileHasColors(decoded.value)) {
+    yield* Effect.logWarning("ignoring environment theme without colors", { path: filePath });
+    return null;
+  }
+  return { raw, file: decoded.value };
+});
+
+/**
+ * Omarchy renders a T3 Code palette into its current theme on every theme switch. Reading it
+ * here follows the switch under any T3 home, not only the ~/.t3 Omarchy's sync script copies to.
+ */
+export const omarchyThemePaths = (homeDirectory: string) => {
+  const currentDir = `${homeDirectory}/.local/state/omarchy/current`;
+  return { currentDir, file: `${currentDir}/theme/t3code.json` };
+};
+const OMARCHY_THEME_ID = EnvironmentThemeId.make("omarchy");
+
+export const readPublishedThemes = Effect.fn(function* (
+  themesDir: string,
+  omarchyThemeFile?: string,
+) {
   const fs = yield* FileSystem.FileSystem;
   const entries = yield* fs
     .readDirectory(themesDir)
@@ -113,30 +153,9 @@ export const readPublishedThemes = Effect.fn(function* (themesDir: string) {
       break;
     }
 
-    const filePath = `${themesDir}/${entry}`;
-    const raw = readThemeFileGuarded(filePath, MAX_THEME_FILE_BYTES);
-    if (raw === null) {
-      yield* Effect.logWarning("ignoring unusable environment theme file", {
-        path: filePath,
-        limit: MAX_THEME_FILE_BYTES,
-      });
-      continue;
-    }
-    if (raw.trim().length === 0) continue;
-
-    const decoded = decodeEnvironmentThemeFileJsonExit(raw);
-    if (decoded._tag === "Failure") {
-      yield* Effect.logWarning("ignoring invalid environment theme", {
-        path: filePath,
-        detail: Cause.pretty(decoded.cause),
-      });
-      continue;
-    }
-    const file = decoded.value;
-    if (!environmentThemeFileHasColors(file)) {
-      yield* Effect.logWarning("ignoring environment theme without colors", { path: filePath });
-      continue;
-    }
+    const read = yield* readThemeFile(`${themesDir}/${entry}`);
+    if (read === null) continue;
+    const { raw, file } = read;
 
     totalBytes += Buffer.byteLength(raw);
     if (totalBytes > MAX_THEME_TOTAL_BYTES) {
@@ -149,12 +168,20 @@ export const readPublishedThemes = Effect.fn(function* (themesDir: string) {
 
     themes.push({ id, ...file });
   }
+  // A published omarchy.json, such as the copy Omarchy's sync script writes, wins.
+  if (omarchyThemeFile !== undefined && !themes.some((theme) => theme.id === OMARCHY_THEME_ID)) {
+    const omarchy = NodeFS.existsSync(omarchyThemeFile)
+      ? yield* readThemeFile(omarchyThemeFile)
+      : null;
+    if (omarchy !== null) themes.push({ id: OMARCHY_THEME_ID, ...omarchy.file });
+  }
   return themes;
 });
 
 const make = Effect.gen(function* () {
   const { environmentThemesDir } = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
+  const omarchy = omarchyThemePaths(yield* HostProcess.HomeDirectory);
   // Sequence numbers let subscribers drop queued events older than their initial snapshot.
   const changes = yield* PubSub.sliding<PublishedThemes>(1);
   const published = yield* Ref.make<PublishedThemes>({ seq: 0, themes: [] });
@@ -165,7 +192,7 @@ const make = Effect.gen(function* () {
 
   const refresh = refreshSemaphore.withPermits(1)(
     Effect.gen(function* () {
-      const themes = yield* readPublishedThemes(environmentThemesDir).pipe(
+      const themes = yield* readPublishedThemes(environmentThemesDir, omarchy.file).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
       );
       // Compare the whole value so new fields cannot silently miss republishes.
@@ -195,6 +222,13 @@ const make = Effect.gen(function* () {
     Effect.forkIn(watcherScope),
     Effect.asVoid,
   );
+  // Omarchy swaps the theme directory on a switch, so watch its parent, which the switch touches.
+  if (NodeFS.existsSync(omarchy.currentDir)) {
+    const omarchyEvents = fs.watch(omarchy.currentDir).pipe(Stream.debounce(Duration.millis(250)));
+    yield* Stream.runForEach(omarchyEvents, () =>
+      refresh.pipe(Effect.ignoreCause({ log: true })),
+    ).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(watcherScope), Effect.asVoid);
+  }
 
   return {
     current: Effect.map(refresh, (state) => state.themes),
