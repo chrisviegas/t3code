@@ -594,16 +594,21 @@ function useSidebarThreads(input: {
           };
         });
   const collapsedGroupKeys = new Set(collapsedGroupList);
-  const threadGroups = threadGroupDefinitions.map((definition) => {
+  // A group with no active threads (all archived, say) leaves the sidebar, and comes back
+  // when a thread is unarchived or moved into it.
+  const threadGroups = threadGroupDefinitions.flatMap((definition) => {
     const members = partition.threadGroupMembers.get(definition.key) ?? EMPTY_THREADS;
+    if (members.length === 0) return [];
     const collapsed = collapsedGroupKeys.has(definition.key);
-    return {
-      ...definition,
-      collapsed,
-      threadCount: members.length,
-      // A closed group still shows the open thread.
-      threads: collapsed ? routeThreadOnly(members, routeRowThreadKey) : members,
-    };
+    return [
+      {
+        ...definition,
+        collapsed,
+        threadCount: members.length,
+        // A closed group still shows the open thread.
+        threads: collapsed ? routeThreadOnly(members, routeRowThreadKey) : members,
+      },
+    ];
   });
   const groupedThreads = [...partition.threadGroupMembers.values()].flat();
   const orderedThreads = [
@@ -1460,19 +1465,92 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       const definition = threadGroups.find((group) => group.key === groupKey);
       if (!api || definition === undefined) return;
       const { environmentId, group } = definition;
+      // Pinned, snoozed and settled members sit on their shelves but still belong to the group.
+      const members = threads.filter(
+        (thread) =>
+          thread.environmentId === environmentId &&
+          thread.groupId === group.id &&
+          thread.archivedAt === null,
+      );
+      const count = members.length;
+      const reportBulkFailure = (
+        title: string,
+        result: Parameters<typeof isAtomCommandInterrupted>[0],
+      ) => {
+        if (isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title,
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      };
       void (async () => {
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             [
               { id: "rename", label: "Rename group", icon: "pencil" },
-              { id: "new", label: "New group…" },
-              { id: "delete", label: "Delete group", destructive: true, separatorBefore: true },
+              {
+                id: "archive-threads",
+                label: `Archive all threads (${count})`,
+                icon: "archive",
+                disabled: count === 0 || !canOperateThreads(members),
+              },
+              {
+                id: "delete-threads",
+                label: `Delete all threads (${count})`,
+                icon: "trash",
+                destructive: true,
+                separatorBefore: true,
+                disabled: count === 0 || !canOperateThreads(members),
+              },
+              { id: "delete", label: "Delete group", icon: "trash", destructive: true },
             ],
             position,
           ),
         );
         if (clicked._tag === "Failure") return;
         switch (clicked.value) {
+          case "archive-threads": {
+            const confirmed = await settlePromise(() =>
+              api.dialogs.confirm(
+                `Archive ${count} thread${count === 1 ? "" : "s"} in "${group.name}"?`,
+              ),
+            );
+            if (confirmed._tag === "Failure" || !confirmed.value) return;
+            for (const thread of members) {
+              const result = await archiveThread(scopeThreadRef(thread.environmentId, thread.id));
+              if (result._tag === "Failure") {
+                reportBulkFailure("Failed to archive threads", result);
+                return;
+              }
+            }
+            return;
+          }
+          case "delete-threads": {
+            const confirmed = await settlePromise(() =>
+              api.dialogs.confirm(
+                [
+                  `Delete ${count} thread${count === 1 ? "" : "s"} in "${group.name}"?`,
+                  "This permanently clears conversation history for these threads.",
+                ].join("\n"),
+                { variant: "destructive" },
+              ),
+            );
+            if (confirmed._tag === "Failure" || !confirmed.value) return;
+            if (!checkThreadOperations(members)) return;
+            const { firstFailure } = await deleteSelectedThreadEntries({
+              entries: members.map((thread) => ({ thread, threadKey: threadShellKey(thread) })),
+              delete: ({ thread }, deletedThreadKeys) =>
+                deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
+                  deletedThreadKeys,
+                }),
+            });
+            if (firstFailure !== null) reportBulkFailure("Failed to delete threads", firstFailure);
+            return;
+          }
           case "rename": {
             const name = await requestThreadGroupName({
               title: "Rename group",
@@ -1480,14 +1558,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               initialName: group.name,
             });
             if (name !== null) await threadGroupActions.renameGroup(environmentId, group.id, name);
-            return;
-          }
-          case "new": {
-            const name = await requestThreadGroupName({
-              title: "New group",
-              submitLabel: "Create",
-            });
-            if (name !== null) await threadGroupActions.createGroup(environmentId, name);
             return;
           }
           case "delete":

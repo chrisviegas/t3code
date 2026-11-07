@@ -422,6 +422,18 @@ export function showContextMenuFallback<T extends string>(
       inner.style.cssText =
         "max-height:calc(100vh - 0.5rem);min-width:0;max-width:24rem;overflow-x:hidden;overflow-y:auto;padding:0.25rem;";
 
+      // Once one row has an icon or check, the rest keep that slot so labels line up.
+      const reserveIconSlot = entries.some(
+        (entry) => typeof entry.icon === "string" || typeof entry.checked === "boolean",
+      );
+      const iconSpacer = () => {
+        const spacer = document.createElement("span");
+        spacer.className = "size-4.5 shrink-0 sm:size-4";
+        spacer.style.cssText = "display:inline-block;width:1rem;height:1rem;flex-shrink:0;";
+        spacer.setAttribute("aria-hidden", "true");
+        return spacer;
+      };
+
       for (const item of entries) {
         if (item.separatorBefore === true && inner.children.length > 0) {
           const separator = document.createElement("div");
@@ -474,20 +486,12 @@ export function showContextMenuFallback<T extends string>(
           button.setAttribute("role", "menuitemradio");
           button.setAttribute("aria-checked", item.checked ? "true" : "false");
           const check = item.checked ? createIconElement("check", "neutral") : null;
-          if (check) {
-            button.appendChild(check);
-          } else {
-            const spacer = document.createElement("span");
-            spacer.className = "size-4.5 shrink-0 sm:size-4";
-            spacer.style.cssText = "display:inline-block;width:1rem;height:1rem;flex-shrink:0;";
-            spacer.setAttribute("aria-hidden", "true");
-            button.appendChild(spacer);
-          }
+          button.appendChild(check ?? iconSpacer());
         } else if (typeof item.icon === "string") {
           const icon = createIconElement(item.icon, isLeafDestructive ? "destructive" : "neutral");
-          if (icon) {
-            button.appendChild(icon);
-          }
+          button.appendChild(icon ?? iconSpacer());
+        } else if (reserveIconSlot) {
+          button.appendChild(iconSpacer());
         }
 
         const label = document.createElement("span");

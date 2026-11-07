@@ -6,6 +6,7 @@ import {
   type RunId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
+  type ThreadGroup,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -92,27 +93,34 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
-// Matches a group by id, then by name ignoring case; an unknown name becomes a new group.
+const groupsUnavailable = () =>
+  new OrchestratorMcpFailure({
+    code: "orchestration_error",
+    message: "Unable to read or save thread groups.",
+  });
+const readThreadGroups = Effect.gen(function* () {
+  const settings = yield* Settings.ServerSettingsService;
+  const { threadGroups } = yield* settings.getSettings.pipe(Effect.mapError(groupsUnavailable));
+  return { settings, groups: threadGroups };
+});
+/** Matches a group by id, then by name ignoring case. */
+const findThreadGroup = (groups: ReadonlyArray<ThreadGroup>, wanted: string) =>
+  groups.find((group) => group.id === wanted) ??
+  groups.find((group) => group.name.toLocaleLowerCase() === wanted.toLocaleLowerCase());
+
+// An unknown name becomes a new group.
 // ponytail: read-then-write on settings, so two agents creating one name at once can both add it.
 const resolveOrCreateThreadGroup = Effect.fn("mcp.resolveOrCreateThreadGroup")(function* (
   wanted: string,
 ) {
-  const settings = yield* Settings.ServerSettingsService;
-  const unavailable = () =>
-    new OrchestratorMcpFailure({
-      code: "orchestration_error",
-      message: "Unable to read or save thread groups.",
-    });
-  const groups = (yield* settings.getSettings.pipe(Effect.mapError(unavailable))).threadGroups;
-  const existing =
-    groups.find((group) => group.id === wanted) ??
-    groups.find((group) => group.name.toLocaleLowerCase() === wanted.toLocaleLowerCase());
+  const { settings, groups } = yield* readThreadGroups;
+  const existing = findThreadGroup(groups, wanted);
   if (existing !== undefined) return existing.id;
   const random = yield* SecureRandom.SecureRandom;
   const created = { id: `grp-${yield* random.uuidV4()}`, name: wanted };
   yield* settings
     .updateSettings({ threadGroups: [...groups, created] })
-    .pipe(Effect.mapError(unavailable));
+    .pipe(Effect.mapError(groupsUnavailable));
   return created.id;
 });
 
@@ -357,6 +365,51 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         }
       }),
     ),
+  ),
+  t3_thread_group: McpToolAccess.writesEnvironment((input) =>
+    Effect.gen(function* () {
+      const { settings, groups } = yield* readThreadGroups;
+      const group = findThreadGroup(groups, input.group);
+      if (group === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: `No sidebar group is named ${input.group}.`,
+        });
+      }
+      const unchanged = { group, threadIds: [], failedThreadIds: [] };
+      if (input.action === "rename" || input.action === "delete") {
+        const name = input.action === "rename" ? yield* required(input.name, "name") : group.name;
+        yield* settings
+          .updateSettings({
+            threadGroups:
+              input.action === "rename"
+                ? groups.map((entry) => (entry.id === group.id ? { ...entry, name } : entry))
+                : groups.filter((entry) => entry.id !== group.id),
+          })
+          .pipe(Effect.mapError(groupsUnavailable));
+        return { ...unchanged, group: { ...group, name } };
+      }
+      const { threads, caller } = yield* readCaller();
+      const members = (yield* threads
+        .listProjectThreads({ includeSubagents: true })
+        .pipe(Effect.mapError(unavailable))).filter(
+        (thread) =>
+          thread.groupId === group.id &&
+          // A thread cannot delete itself mid-turn.
+          !(input.action === "delete_threads" && thread.id === caller?.id),
+      );
+      const type = input.action === "archive_threads" ? "thread.archive" : "thread.delete";
+      const threadIds: ThreadId[] = [];
+      const failedThreadIds: ThreadId[] = [];
+      // One refused thread, such as a running one that cannot be archived, leaves the rest going.
+      for (const thread of members) {
+        const result = yield* threads
+          .dispatch({ type, commandId: yield* newCommandId(), threadId: thread.id })
+          .pipe(Effect.result);
+        (result._tag === "Success" ? threadIds : failedThreadIds).push(thread.id);
+      }
+      return { group, threadIds, failedThreadIds };
+    }),
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
