@@ -1,0 +1,222 @@
+name: Release fork desktop
+
+# Manual desktop release for this fork: a Linux AppImage and a Windows installer,
+# unsigned, published as a GitHub Release in this repository. Installed apps
+# update from this repository's releases, since the update feed follows
+# GITHUB_REPOSITORY. release.yml only runs in pingdotgg/t3code.
+#
+# Versions stay on their own prerelease track (0.1.7-cv.1, 0.1.7-cv.2, ...) so
+# fork tags never collide with upstream tags, and the updater compares fork
+# releases only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v, for example 0.1.7-cv.1"
+        required: true
+        type: string
+
+permissions:
+  # Windows builds read this run's artifact list to wait for the Linux CLI archive.
+  actions: read
+  contents: write
+
+concurrency:
+  group: release-fork
+  cancel-in-progress: false
+
+jobs:
+  config:
+    name: Resolve version and public config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      clerk_publishable_key: ${{ steps.resolve.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.resolve.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.resolve.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ steps.resolve.outputs.relay_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .env.example
+          sparse-checkout-cone-mode: false
+
+      - id: resolve
+        name: Resolve release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Version must look like 0.1.7-cv.1, got '$VERSION'."
+            exit 1
+          fi
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists."
+            exit 1
+          fi
+          # T3 Connect uses the public ids previews use, from .env.example.
+          env_example() { sed -n "s|^T3CODE_$1=||p" .env.example; }
+          {
+            echo "version=$VERSION"
+            echo "tag=$tag"
+            echo "ref=$(git rev-parse HEAD)"
+            echo "clerk_publishable_key=$(env_example CLERK_PUBLISHABLE_KEY)"
+            echo "clerk_jwt_template=$(env_example CLERK_JWT_TEMPLATE)"
+            echo "clerk_cli_oauth_client_id=$(env_example CLERK_CLI_OAUTH_CLIENT_ID)"
+            echo "relay_url=$(env_example RELAY_URL)"
+          } >> "$GITHUB_OUTPUT"
+
+  build_bundle:
+    name: Build JS bundle
+    needs: [config]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.config.outputs.clerk_publishable_key }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.config.outputs.clerk_jwt_template }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.config.outputs.clerk_cli_oauth_client_id }}
+      T3CODE_RELAY_URL: ${{ needs.config.outputs.relay_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.config.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.config.outputs.version }}"
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      # @t3tools/desktop#build compiles the Linux browser secret helper, which needs libsecret headers.
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run build:desktop
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  # The Windows job embeds the Linux CLI archive as its WSL runtime and waits for
+  # the job named "Build Linux x64" to upload it, so that label must stay.
+  desktop_linux_x64:
+    name: Desktop Linux x64
+    needs: [config, build_bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.config.outputs.version }}
+      ref: ${{ needs.config.outputs.ref }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.config.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.config.outputs.relay_url }}
+      label: Linux x64
+      runner: ubuntu-24.04
+      platform: linux
+      target: AppImage
+      arch: x64
+      rust_target: x86_64-unknown-linux-gnu
+      resource_key: linux-x64
+      cli_archive: true
+
+  desktop_win_x64:
+    name: Desktop Windows x64
+    needs: [config, build_bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.config.outputs.version }}
+      ref: ${{ needs.config.outputs.ref }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.config.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.config.outputs.relay_url }}
+      label: Windows x64
+      runner: ubuntu-24.04
+      verify_runner: windows-2025
+      platform: win
+      target: nsis
+      arch: x64
+      rust_target: x86_64-pc-windows-msvc
+      resource_key: win32-x64
+
+  release:
+    name: Publish GitHub Release
+    needs: [config, desktop_linux_x64, desktop_win_x64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.config.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      # The Windows job names its feed latest-win-x64.yml; electron-updater reads latest.yml.
+      - name: Name Windows updater manifest
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for manifest in release-assets/*-win-x64.yml; do
+            mv "$manifest" "${manifest%-win-x64.yml}.yml"
+          done
+          rm -f release-assets/builder-debug.yml
+          ls -la release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.config.outputs.tag }}
+          target_commitish: ${{ needs.config.outputs.ref }}
+          name: T3 Code ${{ needs.config.outputs.version }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            release-assets/*.AppImage
+            release-assets/*.exe
+            release-assets/*.blockmap
+            release-assets/*.yml
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
