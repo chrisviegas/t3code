@@ -541,11 +541,12 @@ function nestingIndentStyle(depth: number) {
 
 // Ancestor levels with a later sibling get a full-height line; the row's own level gets an elbow
 // into its first line, running on down when a sibling follows.
-function NestingTreeLines(props: { guides: string; offsetRem?: number }) {
+function NestingTreeLines(props: { guides: string }) {
   if (props.guides === "") return null;
   const depth = props.guides.length;
-  const inset = (level: number) =>
-    `${level * NESTING_INDENT_REM + 0.5 + (props.offsetRem ?? 0)}rem`;
+  // Each level's line sits just left of the indented row it leads to, outside its hover surface.
+  const inset = (level: number) => `${level * NESTING_INDENT_REM + 0.625}rem`;
+  const continues = props.guides[depth - 1] === "1";
   return (
     <>
       {[...props.guides].map((guide, level) =>
@@ -554,17 +555,19 @@ function NestingTreeLines(props: { guides: string; offsetRem?: number }) {
             // oxlint-disable-next-line react/no-array-index-key -- a guide is its tree level; levels never reorder
             key={level}
             aria-hidden
-            className={cn(
-              "pointer-events-none absolute bottom-0 border-l border-border",
-              level === depth - 1 ? "top-4" : "top-0",
-            )}
+            // -bottom-px bridges the 1px gap between rows.
+            className="pointer-events-none absolute top-0 -bottom-px border-l border-border"
             style={{ insetInlineStart: inset(level) }}
           />
         ) : null,
       )}
+      {/* Starts a little below the parent row and turns at this row's center, short of its surface. */}
       <span
         aria-hidden
-        className="pointer-events-none absolute top-0 h-4.5 w-2 rounded-bl-sm border-b border-l border-border"
+        className={cn(
+          "pointer-events-none absolute -top-1 h-5.5 w-1 border-b border-l border-border",
+          !continues && "rounded-bl-sm",
+        )}
         style={{ insetInlineStart: inset(depth - 1) }}
       />
     </>
@@ -1291,14 +1294,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         {...sortableRootProps}
         {...(fileDropHandlers ?? {})}
         className={cn(
-          "list-none [content-visibility:auto] [contain-intrinsic-size:auto_--spacing(9)]",
-          metaLine !== null && multiline && "[contain-intrinsic-size:auto_--spacing(13.5)]",
+          "list-none",
+          // Skipped for nested rows: its paint containment would clip tree lines to the row.
+          nestingGuides === "" &&
+            "[content-visibility:auto] [contain-intrinsic-size:auto_--spacing(9)]",
+          nestingGuides === "" &&
+            metaLine !== null &&
+            multiline &&
+            "[contain-intrinsic-size:auto_--spacing(13.5)]",
           sortable?.isDragging && "relative z-20",
           nestingGuides !== "" && "relative",
         )}
         style={nestingIndentStyle(nestingGuides.length)}
       >
-        <NestingTreeLines guides={nestingGuides} offsetRem={inFolder && !inGroup ? 1.75 : 0} />
+        <NestingTreeLines guides={nestingGuides} />
         <Tooltip disabled={sortable?.isDragging}>
           <TooltipTrigger
             render={
