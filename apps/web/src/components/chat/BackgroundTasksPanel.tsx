@@ -1,6 +1,7 @@
 import type { OrchestrationV2BackgroundTaskOutput, ScopedThreadRef } from "@t3tools/contracts";
 import { TerminalIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { create } from "zustand";
 
 import { cn } from "~/lib/utils";
 import { useThreadShell } from "~/state/entities";
@@ -8,6 +9,10 @@ import { orchestrationEnvironment } from "~/state/orchestration";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 const POLL_MS = 1_000;
+
+// The details card picks a command before the panel mounts, so the choice lives outside it.
+const useSelectedTask = create<{ readonly taskId: string | null }>(() => ({ taskId: null }));
+export const selectBackgroundTask = (taskId: string) => useSelectedTask.setState({ taskId });
 
 type SeenTask = { readonly taskId: string; readonly label: string; readonly running: boolean };
 
@@ -42,7 +47,7 @@ export function BackgroundTasksPanel(props: {
       ...seen.map((task) => ({ ...task, running: liveIds.has(task.taskId) })),
     ]);
   }
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedId = useSelectedTask((state) => state.taskId);
   const selected = seen.find((task) => task.taskId === selectedId) ?? seen[0] ?? null;
 
   if (seen.length === 0) {
@@ -61,7 +66,7 @@ export function BackgroundTasksPanel(props: {
             <button
               type="button"
               aria-pressed={task.taskId === selected?.taskId}
-              onClick={() => setSelectedId(task.taskId)}
+              onClick={() => selectBackgroundTask(task.taskId)}
               className={cn(
                 "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors duration-150 outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                 task.taskId === selected?.taskId && "bg-accent",
