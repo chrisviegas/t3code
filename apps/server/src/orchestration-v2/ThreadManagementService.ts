@@ -17,6 +17,9 @@ import {
   type OrchestrationV2StopWorkflowInput,
   OrchestrationV2BackgroundCommandError,
   type OrchestrationV2BackgroundCommandInput,
+  OrchestrationV2ReadBackgroundTaskOutputError,
+  type OrchestrationV2ReadBackgroundTaskOutputInput,
+  type OrchestrationV2BackgroundTaskOutput,
   OrchestrationV2ForceStopThreadError,
   type OrchestrationV2ForceStopThreadInput,
   type OrchestrationV2ForceStopThreadResult,
@@ -475,6 +478,12 @@ export interface ThreadManagementServiceShape {
   readonly backgroundCommand: (
     input: OrchestrationV2BackgroundCommandInput,
   ) => Effect.Effect<void, OrchestrationV2BackgroundCommandError>;
+  readonly readBackgroundTaskOutput: (
+    input: OrchestrationV2ReadBackgroundTaskOutputInput,
+  ) => Effect.Effect<
+    OrchestrationV2BackgroundTaskOutput,
+    OrchestrationV2ReadBackgroundTaskOutputError
+  >;
   /**
    * Kills the thread's agent for a provider that no longer responds, then ends
    * its turn as interrupted. Never kills a process other working threads share.
@@ -1390,6 +1399,33 @@ const make = Effect.gen(function* () {
     if (!moved) return yield* fail("not-running");
   });
 
+  // The task id does not name its provider thread, so each live session of the thread is asked.
+  const readBackgroundTaskOutput: ThreadManagementServiceShape["readBackgroundTaskOutput"] =
+    Effect.fn("ThreadManagementService.readBackgroundTaskOutput")(function* (input) {
+      const fail = (cause?: unknown) =>
+        new OrchestrationV2ReadBackgroundTaskOutputError({
+          ...input,
+          ...(cause === undefined ? {} : { cause }),
+        });
+      const records = yield* orchestrator
+        .getThreadRecords(input.threadId, ["providerThreads"])
+        .pipe(Effect.mapError(fail));
+      let lastCause: unknown;
+      for (const providerThread of records.providerThreads.toReversed()) {
+        if (providerThread.providerSessionId == null) continue;
+        const runtime = yield* sessions
+          .get(providerThread.providerSessionId)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (Option.isNone(runtime) || runtime.value.readTaskOutput === undefined) continue;
+        const result = yield* runtime.value
+          .readTaskOutput({ taskId: input.taskId })
+          .pipe(Effect.timeout("10 seconds"), Effect.result);
+        if (result._tag === "Success") return result.success;
+        lastCause = result.failure;
+      }
+      return yield* fail(lastCause);
+    });
+
   const awaitBackgroundTasks: ThreadManagementServiceShape["awaitBackgroundTasks"] = Effect.fn(
     "ThreadManagementService.awaitBackgroundTasks",
   )(function* (input) {
@@ -1596,6 +1632,7 @@ const make = Effect.gen(function* () {
     stopDelegatedTasks,
     stopWorkflow,
     backgroundCommand,
+    readBackgroundTaskOutput,
     forceStopThread,
     awaitBackgroundTasks,
     getThreadEventSequence: orchestrator.getThreadEventSequence,

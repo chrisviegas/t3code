@@ -1,11 +1,11 @@
-import type { ScopedThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ThreadGroup } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadGroup } from "@t3tools/contracts";
 
 import { toastManager } from "~/components/ui/toast";
+import { randomUUID } from "~/lib/utils";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { serverEnvironment } from "~/state/server";
 import { threadEnvironment } from "~/state/threads";
@@ -20,8 +20,8 @@ export function readThreadGroups(environmentId: EnvironmentId): ReadonlyArray<Th
   );
 }
 
-function reportFailure(title: string, result: Parameters<typeof squashAtomCommandFailure>[0]) {
-  if (isAtomCommandInterrupted(result)) return;
+function reportFailure(title: string, result: Parameters<typeof isAtomCommandInterrupted>[0]) {
+  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
   const error = squashAtomCommandFailure(result);
   toastManager.add({
     type: "error",
@@ -65,7 +65,7 @@ export function useThreadGroupActions() {
       name: string,
       target: ScopedThreadRef,
     ): Promise<void> => {
-      const group = { id: `grp-${crypto.randomUUID()}`, name };
+      const group = { id: `grp-${randomUUID()}`, name };
       if (!(await saveGroups(environmentId, [...readThreadGroups(environmentId), group]))) return;
       await moveThread(target, group.id);
     },
@@ -76,6 +76,18 @@ export function useThreadGroupActions() {
           group.id === groupId ? { ...group, name } : group,
         ),
       ),
+    /** Puts the environment's groups in the order of `groupIds`. */
+    reorderGroups: (environmentId: EnvironmentId, groupIds: ReadonlyArray<string>) => {
+      const groups = readThreadGroups(environmentId);
+      const rank = (group: ThreadGroup) => {
+        const index = groupIds.indexOf(group.id);
+        return index === -1 ? groupIds.length : index;
+      };
+      return saveGroups(
+        environmentId,
+        groups.toSorted((a, b) => rank(a) - rank(b)),
+      );
+    },
     // Threads keep the stale id; an unknown group reads as none, so nothing else is rewritten.
     deleteGroup: (environmentId: EnvironmentId, groupId: string) =>
       saveGroups(

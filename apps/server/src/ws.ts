@@ -2058,6 +2058,8 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
         [ORCHESTRATION_V2_WS_METHODS.backgroundCommand]: (input) =>
           threadManagement.backgroundCommand(input),
+        [ORCHESTRATION_V2_WS_METHODS.readBackgroundTaskOutput]: (input) =>
+          threadManagement.readBackgroundTaskOutput(input),
         [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: (input) =>
           threadManagement.forceStopThread(input),
         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>

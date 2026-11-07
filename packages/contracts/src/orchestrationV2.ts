@@ -3610,6 +3610,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getNativeChildWork: "orchestration.getNativeChildWork",
   stopWorkflow: "orchestration.stopWorkflow",
   backgroundCommand: "orchestration.backgroundCommand",
+  readBackgroundTaskOutput: "orchestration.readBackgroundTaskOutput",
   forceStopThread: "orchestration.forceStopThread",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
@@ -4005,6 +4006,35 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
   }
 }
 
+/** The end of a background command's output, read from the agent that runs it. */
+export const OrchestrationV2ReadBackgroundTaskOutputInput = Schema.Struct({
+  threadId: ThreadId,
+  taskId: TrimmedNonEmptyString,
+});
+export type OrchestrationV2ReadBackgroundTaskOutputInput =
+  typeof OrchestrationV2ReadBackgroundTaskOutputInput.Type;
+
+export const OrchestrationV2BackgroundTaskOutput = Schema.Struct({
+  output: Schema.String,
+  totalBytes: Schema.Number,
+  /** Only the last part of a longer output. */
+  truncated: Schema.Boolean,
+});
+export type OrchestrationV2BackgroundTaskOutput = typeof OrchestrationV2BackgroundTaskOutput.Type;
+
+export class OrchestrationV2ReadBackgroundTaskOutputError extends Schema.TaggedError<OrchestrationV2ReadBackgroundTaskOutputError>()(
+  "OrchestrationV2ReadBackgroundTaskOutputError",
+  {
+    threadId: ThreadId,
+    taskId: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return "This command's output is not available; its agent session may have ended.";
+  }
+}
+
 /** Moves a running command to the background: it keeps running and the agent's turn goes on. */
 export const OrchestrationV2BackgroundCommandInput = Schema.Struct({
   threadId: ThreadId,
@@ -4311,6 +4341,10 @@ export const OrchestrationV2RpcSchemas = {
   backgroundCommand: {
     input: OrchestrationV2BackgroundCommandInput,
     output: Schema.Void,
+  },
+  readBackgroundTaskOutput: {
+    input: OrchestrationV2ReadBackgroundTaskOutputInput,
+    output: OrchestrationV2BackgroundTaskOutput,
   },
   forceStopThread: {
     input: OrchestrationV2ForceStopThreadInput,

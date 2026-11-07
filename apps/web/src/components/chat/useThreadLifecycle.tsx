@@ -38,6 +38,7 @@ import { settleAndAdvance } from "../../settleAndAdvance";
 import type { ChatShortcutCommands } from "./useChatShortcuts";
 import { resolveThreadLastVisitedAt } from "../Sidebar.logic";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { useRightPanelStore } from "../../rightPanelStore";
 import { type SetStateAction, useRef, useState } from "react";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import {
@@ -600,6 +601,10 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
         stopping: isStoppingBackgroundWork,
         onStop: handleStopBackgroundWorkStable,
         onOpenThread: onOpenRelatedThreadStable,
+        onShowOutput: () =>
+          useRightPanelStore
+            .getState()
+            .open(scopeThreadRef(environmentId, activeThread.id), "tasks"),
       })
     : null;
   // The relative times read the clock; nowMinute re-renders them on the minute.

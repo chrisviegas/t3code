@@ -657,6 +657,12 @@ export interface ProviderAdapterV2SessionRuntime {
    * Moves a running tool call, by its native id, to the background: it keeps running and the
    * turn goes on. False when no running tool call has that id.
    */
+  readonly readTaskOutput?: (input: {
+    readonly taskId: string;
+  }) => Effect.Effect<
+    { readonly output: string; readonly totalBytes: number; readonly truncated: boolean },
+    ProviderAdapterV2Error
+  >;
   readonly backgroundToolCall?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly nativeItemId: string;
