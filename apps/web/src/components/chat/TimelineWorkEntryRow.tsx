@@ -25,6 +25,10 @@ import {
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { claudeSkillInvocation } from "@t3tools/shared/toolActivity";
 import { memo, use, useState, type KeyboardEvent } from "react";
+import { useAtomValue } from "@effect/atom-react";
+import type { OrchestrationV2TurnItem, TurnItemId } from "@t3tools/contracts";
+import { orchestrationEnvironment } from "../../state/orchestration";
+import { useAtomCommand } from "../../state/use-atom-command";
 import {
   workEntryDisplayIndicatesToolFailure,
   workEntrySignalsSevereFailure,
@@ -32,7 +36,7 @@ import {
 } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
 import { ChatMarkdownAssetImage } from "./ChatMarkdownMedia";
-import { ChevronRightIcon, CircleAlertIcon, XIcon, RotateCcwIcon } from "lucide-react";
+import { ChevronRightIcon, CircleAlertIcon, CopyIcon, XIcon, RotateCcwIcon } from "lucide-react";
 import { Button, InlineButton } from "../ui/button";
 import { useAssetUrls } from "../../assets/assetUrls";
 import { useThreadShell } from "../../state/entities";
@@ -476,6 +480,13 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               Open chat
             </button>
           ) : null}
+          {ctx.turnItemSource === undefined && canRunInBackground(workEntry.projectedItem?.item) ? (
+            <RunInBackgroundButton
+              environmentId={ctx.activeThreadEnvironmentId}
+              threadId={workEntry.projectedItem!.sourceThreadId}
+              itemId={workEntry.projectedItem!.sourceItemId}
+            />
+          ) : null}
           {notifiedSubagentThreadId ? (
             <InlineButton
               aria-label="Open subagent thread"
@@ -564,6 +575,47 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         </WorkLogDetails>
       ) : null}
     </WorkLogRow>
+  );
+}
+
+/** Claude can move a running command to the background, as Ctrl+B does in its terminal. */
+function canRunInBackground(item: OrchestrationV2TurnItem | undefined): boolean {
+  return (
+    item?.type === "command_execution" &&
+    item.status === "running" &&
+    item.monitor !== true &&
+    item.nativeItemRef?.driver === "claudeAgent"
+  );
+}
+
+function RunInBackgroundButton(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly itemId: TurnItemId;
+}) {
+  const backgroundCommand = useAtomCommand(orchestrationEnvironment.backgroundCommand);
+  const allowed = useAtomValue(
+    orchestrationEnvironment.backgroundCommand.permissionAtom(props.environmentId),
+  );
+  const [pending, setPending] = useState(false);
+  if (!allowed) return null;
+  return (
+    <InlineButton
+      disabled={pending}
+      onClick={async (event) => {
+        event.stopPropagation();
+        setPending(true);
+        await backgroundCommand({
+          environmentId: props.environmentId,
+          input: { threadId: props.threadId, itemId: props.itemId },
+        });
+        setPending(false);
+      }}
+      onKeyDown={stopRowToggle}
+    >
+      <CopyIcon aria-hidden className="size-3.5" />
+      Run in background
+    </InlineButton>
   );
 }
 
