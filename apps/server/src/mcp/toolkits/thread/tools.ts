@@ -19,6 +19,7 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  ThreadGroup,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
@@ -67,6 +68,32 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
 })
   .annotate(Tool.Title, "Organize a thread")
   .annotate(Tool.Strict, true)
+  .annotate(Tool.Destructive, true);
+
+const ThreadGroupTool = Tool.make("t3_thread_group", {
+  description:
+    "Manage a sidebar group, by name or id in `group`. archive_threads: archive every active thread in it. delete_threads: permanently delete them, skipping this thread. A group with no active threads leaves the sidebar until one returns to it. rename: to `name`. delete: remove the group; its threads stay. Needs a full-access or default caller.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    action: Schema.Literals(["archive_threads", "delete_threads", "rename", "delete"]),
+    group: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
+    name: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(80))),
+  }),
+  success: Schema.Struct({
+    group: ThreadGroup,
+    threadIds: Schema.Array(ThreadId),
+    failedThreadIds: Schema.Array(ThreadId),
+  }),
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    SecureRandom.SecureRandom,
+    Settings.ServerSettingsService,
+  ],
+})
+  .annotate(Tool.Title, "Manage a thread group")
   .annotate(Tool.Destructive, true);
 
 const commandTool = {
@@ -248,6 +275,7 @@ export const ThreadToolkit = Toolkit.make(
   ThreadConfigureTool,
   ThreadTransferTool,
   ThreadOrganizeTool,
+  ThreadGroupTool,
   PendingRequestTool,
   QueueTool,
 );

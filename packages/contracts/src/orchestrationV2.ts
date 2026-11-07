@@ -3609,6 +3609,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getWorkflowScript: "orchestration.getWorkflowScript",
   getNativeChildWork: "orchestration.getNativeChildWork",
   stopWorkflow: "orchestration.stopWorkflow",
+  backgroundCommand: "orchestration.backgroundCommand",
   forceStopThread: "orchestration.forceStopThread",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
@@ -4004,6 +4005,37 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
   }
 }
 
+/** Moves a running command to the background: it keeps running and the agent's turn goes on. */
+export const OrchestrationV2BackgroundCommandInput = Schema.Struct({
+  threadId: ThreadId,
+  itemId: TurnItemId,
+});
+export type OrchestrationV2BackgroundCommandInput =
+  typeof OrchestrationV2BackgroundCommandInput.Type;
+
+export class OrchestrationV2BackgroundCommandError extends Schema.TaggedError<OrchestrationV2BackgroundCommandError>()(
+  "OrchestrationV2BackgroundCommandError",
+  {
+    threadId: ThreadId,
+    itemId: TurnItemId,
+    reason: Schema.Literals(["not-running", "unsupported", "unavailable", "failed"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "not-running":
+        return "This command is no longer running.";
+      case "unsupported":
+        return "This provider cannot move a command to the background.";
+      case "unavailable":
+        return "This command has no live provider session.";
+      case "failed":
+        return "Failed to move the command to the background.";
+    }
+  }
+}
+
 export const OrchestrationV2ForceStopThreadInput = Schema.Struct({
   threadId: ThreadId,
   /** The run the user saw ignore Stop; Force stop refuses once a newer run has started. */
@@ -4274,6 +4306,10 @@ export const OrchestrationV2RpcSchemas = {
   },
   stopWorkflow: {
     input: OrchestrationV2StopWorkflowInput,
+    output: Schema.Void,
+  },
+  backgroundCommand: {
+    input: OrchestrationV2BackgroundCommandInput,
     output: Schema.Void,
   },
   forceStopThread: {

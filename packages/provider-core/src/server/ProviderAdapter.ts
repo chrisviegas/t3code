@@ -654,6 +654,14 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly taskId: string;
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
   /**
+   * Moves a running tool call, by its native id, to the background: it keeps running and the
+   * turn goes on. False when no running tool call has that id.
+   */
+  readonly backgroundToolCall?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly nativeItemId: string;
+  }) => Effect.Effect<boolean, ProviderAdapterV2Error>;
+  /**
    * Marks or unmarks background tasks the agent will resume from, using the ids the agent saw.
    * Ids not running on this provider thread come back unmatched and change nothing.
    */

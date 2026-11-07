@@ -59,15 +59,15 @@ export function useThreadGroupActions() {
 
   return {
     moveThread,
-    /** Creates the group, then moves `target` into it when given. */
+    /** Creates the group with `target` in it; an empty group would not show. */
     createGroup: async (
       environmentId: EnvironmentId,
       name: string,
-      target?: ScopedThreadRef,
+      target: ScopedThreadRef,
     ): Promise<void> => {
       const group = { id: `grp-${crypto.randomUUID()}`, name };
       if (!(await saveGroups(environmentId, [...readThreadGroups(environmentId), group]))) return;
-      if (target !== undefined) await moveThread(target, group.id);
+      await moveThread(target, group.id);
     },
     renameGroup: (environmentId: EnvironmentId, groupId: string, name: string) =>
       saveGroups(
